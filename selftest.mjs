@@ -261,5 +261,30 @@ assert("tool arg: a regex that matches nothing says so", !!outcome.blocked && /m
 outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" offset="-1" pattern="([\\d+" />' });
 assert("tool arg: an invalid pattern is refused as invalid", !!outcome.blocked && /not a valid regular expression/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
+// --- format: any strftime shape ---------------------------------------------------------------------
+
+const pad2 = (n) => String(n).padStart(2, "0");
+const now = new Date();
+const quarter = Math.floor(now.getMonth() / 3) + 1;
+const inSevenDays = new Date(now.getTime() + 7 * 86_400_000);
+
+outcome = await session.call("bash", { command: 'echo <pi-date format="%Y-%m" />' });
+assert('tool arg: format="%Y-%m" renders year-month', !outcome.blocked && outcome.input.command === `echo ${now.getFullYear()}-${pad2(now.getMonth() + 1)}`, outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-date value="date" offset="+1w" format="%Y-%m-%d" />' });
+assert('tool arg: format applies to an offset date too', !outcome.blocked && outcome.input.command === `echo ${inSevenDays.getFullYear()}-${pad2(inSevenDays.getMonth() + 1)}-${pad2(inSevenDays.getDate())}`, outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="date" format="%d.%m.%Y" />' });
+assert('tool arg: <pi-ref type="date" format="..." /> takes the format as well', !outcome.blocked && outcome.input.command === `echo ${pad2(now.getDate())}.${pad2(now.getMonth() + 1)}.${now.getFullYear()}`, outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-date format="%Q %y" />' });
+assert('tool arg: an unknown % token is left as written, a known one is filled', !outcome.blocked && outcome.input.command === `echo ${quarter} %y`, outcome.input.command);
+
+const tomorrow = new Date(now.getTime() + 86_400_000);
+const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: 'return ctx.date("date", "+1d", "%Y/%m/%d")' } } });
+await fmtTag.userMessage("x");
+const fmtOutcome = await fmtTag.call("bash", { command: "echo <pi-fmt />" });
+assert("js tag: ctx.date(kind, offset, format) formats", !fmtOutcome.blocked && fmtOutcome.input.command === `echo ${tomorrow.getFullYear()}/${pad2(tomorrow.getMonth() + 1)}/${pad2(tomorrow.getDate())}`, fmtOutcome.input.command);
+
 console.log(`\n${failures === 0 ? "SELFTEST PASSED" : "SELFTEST FAILED"} (${failures} failing)`);
 process.exit(failures === 0 ? 0 : 1);

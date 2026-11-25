@@ -20,6 +20,7 @@ A [pi](https://github.com/badlogic/pi-mono) coding-agent extension.
 <pi-ref type="number" offset="-1" />          the first number in it (index="2" the second)
 <pi-ref type="regex" offset="-1" pattern="issue (\d+)" />  what your own regex captures
 <pi-date value="date" offset="+3d" />        2026-11-29  (datetime, time, today, yesterday, tomorrow, week, year)
+<pi-date format="%Y-%m" />                   any strftime shape: %Y %m %d %F %T %H %M %S %j %V %u %A %B %Q %s
 <pi-pr n="12" />                             a tag you defined in JSON
 ```
 
@@ -194,7 +195,7 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-40 checks against a fake pi host and real temp files: every built-in type (`url`, `path`, `line`, `text`,
+43 checks against a fake pi host and real temp files: every built-in type (`url`, `path`, `line`, `text`,
 `number`, `regex`, `date`, `tag`), every user tag shape (`value`, `template`, `hook`, `js`, `pattern`), a
 throwing hook, a malformed and an out-of-range `offset`, a regex that matches nothing, an invalid pattern,
 `@scope/pkg` and HTML left alone, the `@` shorthand and its switch, assistant message rewriting, your own input

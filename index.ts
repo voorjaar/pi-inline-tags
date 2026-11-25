@@ -117,7 +117,7 @@ type TagContext = {
   cwd: string;
   env: (name: string) => string | undefined;
   now: () => string;
-  date: (kind?: string, offset?: string) => string;
+  date: (kind?: string, offset?: string, format?: string) => string;
   message: (index?: string, type?: string, number?: string) => string;
   userMessages: number;
 };
@@ -359,7 +359,49 @@ function linesOf(message: UserMessage): string[] {
 
 const MS_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
 
-function dateValue(kind: string, modifier?: string): string | undefined {
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/** The `%` tokens `<pi-date format="..." />` understands. An unknown one is left as written. */
+function strftime(date: Date, format: string): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, "0");
+  const isoWeek = (value: Date): { year: number; week: number } => {
+    const probe = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+    probe.setDate(probe.getDate() + 3 - ((probe.getDay() + 6) % 7));
+    const year = probe.getFullYear();
+    const firstOfYear = new Date(year, 0, 1);
+    const week = 1 + Math.round(((probe.getTime() - firstOfYear.getTime()) / 86_400_000 - 3 + ((firstOfYear.getDay() + 6) % 7)) / 7);
+    return { year, week };
+  };
+  const dayOfYear = 1 + Math.floor((date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86_400_000);
+  const iso = isoWeek(date);
+  const tokens: Record<string, string> = {
+    Y: String(date.getFullYear()),
+    G: String(iso.year),
+    m: pad(date.getMonth() + 1),
+    b: MONTHS[date.getMonth()]!.slice(0, 3),
+    B: MONTHS[date.getMonth()]!,
+    d: pad(date.getDate()),
+    F: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    j: pad(dayOfYear, 3),
+    W: pad(Math.floor((dayOfYear - 1 + ((date.getDay() + 6) % 7)) / 7)),
+    V: String(iso.week),
+    u: String(((date.getDay() + 6) % 7) + 1),
+    w: String(date.getDay()),
+    a: WEEKDAYS[date.getDay()]!.slice(0, 3),
+    A: WEEKDAYS[date.getDay()]!,
+    H: pad(date.getHours()),
+    M: pad(date.getMinutes()),
+    S: pad(date.getSeconds()),
+    T: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    Q: String(Math.floor(date.getMonth() / 3) + 1),
+    s: String(Math.floor(date.getTime() / 1000)),
+    "%": "%",
+  };
+  return format.replace(/%([A-Za-z%])/g, (whole, key: string) => tokens[key] ?? whole);
+}
+
+function dateValue(kind: string, modifier?: string, format?: string): string | undefined {
   const base = new Date();
   if (kind === "yesterday") base.setDate(base.getDate() - 1);
   if (kind === "tomorrow") base.setDate(base.getDate() + 1);
@@ -369,6 +411,7 @@ function dateValue(kind: string, modifier?: string): string | undefined {
     const amount = Number(match[2]) * (match[1] === "-" ? -1 : 1);
     base.setTime(base.getTime() + amount * (MS_UNITS[match[3] ?? "d"] ?? 0));
   }
+  if (format) return strftime(base, format);
   const pad = (value: number) => String(value).padStart(2, "0");
   const day = `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`;
   const clock = `${pad(base.getHours())}:${pad(base.getMinutes())}`;
@@ -658,7 +701,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     cwd: process.cwd(),
     env: (name: string) => process.env[name],
     now: () => new Date().toISOString(),
-    date: (kind = "date", offset?: string) => dateValue(kind, offset) ?? dateValue("date") ?? "",
+    date: (kind = "date", offset?: string, format?: string) => dateValue(kind, offset, format) ?? dateValue("date") ?? "",
     message: (offset = "-1", type = "text", index?: string) => {
       const requested = Number(offset);
       const n = Number.isFinite(requested) ? (requested > 0 ? requested : userMessages.length + requested + 1) : userMessages.length;
@@ -702,7 +745,18 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return value;
   };
 
+  const resolveDateAttrs = (attrs: Record<string, string>): { value?: string; missing?: string } => {
+    const kind = attrs.value ?? attrs.kind ?? "date";
+    const format = attrs.format ?? attrs.style;
+    if (format !== undefined && format.length > 64) return { missing: `format="${format}" is longer than 64 characters` };
+    const value = dateValue(kind, attrs.offset, format);
+    return value
+      ? { value }
+      : { missing: `<pi-date value="${kind}" offset="${attrs.offset ?? ""}" /> - value must be date, datetime, time, today, yesterday, tomorrow, week or year, and offset must look like +3d, -2h, +10m, +1w` };
+  };
+
   const resolveDirect = (request: DirectRequest, attrs: Record<string, string>): { value?: string; missing?: string } => {
+    if (request.kind === "date") return resolveDateAttrs(attrs);
     const offset = attrs.offset ?? attrs.message ?? "-1";
     if (!/^-?\d+$/.test(offset)) return { missing: `offset="${offset}" must be a message offset (offset="-1" is the most recent)` };
     const requested = Number(offset);
@@ -752,7 +806,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const depthOf = (_attrs: Record<string, string>): number => 0;
 
-  type DirectRequest = { kind: "number" | "regex"; attrs: Record<string, string> };
+  type DirectRequest = { kind: "number" | "regex" | "date"; attrs: Record<string, string> };
 
   const resolveBuiltinElement = (tag: string, attrs: Record<string, string>): { token?: string; error?: string; direct?: DirectRequest } => {
     switch (tag) {
@@ -760,7 +814,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         // Canonical: <ref type="url" index="-1" /> - explicit about what and which message.
         const type = (attrs.type ?? "").toLowerCase();
         // offset = which message (-1 is the most recent), index = which entry inside that message.
-        if (type === "date") return { token: `${attrs.value ?? "date"}${attrs.offset ?? ""}` };
+        if (type === "date") return { direct: { kind: "date", attrs } };
         const offset = attrs.offset ?? attrs.message ?? "-1";
         if (!/^-?\d+$/.test(offset)) return { error: `<pi-ref type="${type}" offset="${offset}" /> - offset must be a message offset, negative to count back from the most recent (-1)` };
         const ordinal = attrs.index ?? "";
@@ -787,7 +841,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         return { error: '<ref ... /> needs type="url|path|line|text|date|tag|hook" (or u="7.url", date="date+3d", name="mini")' };
       }
       case "date":
-        return { token: `${attrs.value ?? attrs.kind ?? attrs.format ?? "date"}${attrs.offset ?? ""}` };
+        return { direct: { kind: "date", attrs } };
       default:
         return { error: `unknown reference element <${tag}>` };
     }
@@ -950,7 +1004,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const options = (event as { systemPromptOptions?: { promptGuidelines?: string[] } }).systemPromptOptions;
     if (!options) return;
     const guidelines: string[] = [
-      'Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" offset="-1" /> is the first URL in the most recent message (offset="-2" is the one before), <pi-ref type="url" offset="-1" index="2" /> its second URL, <pi-ref type="path" offset="-1" /> its first path, <pi-ref type="line" offset="-1" index="3" /> its third line, <pi-ref type="text" offset="-1" /> the whole message, <pi-ref type="number" offset="-1" index="2" /> the second number in it, <pi-ref type="regex" offset="-1" pattern="gate#(\\d+)" /> what your own regex captures, <pi-date value="date" offset="+3d" /> a computed date, <pi-pr n="12" /> a tag the user defined in config.',
+      'Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" offset="-1" /> is the first URL in the most recent message (offset="-2" is the one before), <pi-ref type="url" offset="-1" index="2" /> its second URL, <pi-ref type="path" offset="-1" /> its first path, <pi-ref type="line" offset="-1" index="3" /> its third line, <pi-ref type="text" offset="-1" /> the whole message, <pi-ref type="number" offset="-1" index="2" /> the second number in it, <pi-ref type="regex" offset="-1" pattern="gate#(\\d+)" /> what your own regex captures, <pi-date value="date" offset="+3d" format="%Y-%m-%d" /> a computed date in any strftime shape (%Y %m %d %H %M %S %F %T %j %V %u %A %B %Q %s), <pi-pr n="12" /> a tag the user defined in config.',
     ];
     const index = refIndexLines();
     if (index.length > 0) guidelines.push(`References available now: ${index.join(" · ")}`);

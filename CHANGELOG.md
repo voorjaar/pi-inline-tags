@@ -8,6 +8,9 @@
   entry inside that message.
 - `<pi-date value="date|datetime|time|today|yesterday|tomorrow|week|year" offset="+3d|-2h|+10m|+1w" />` is
   computed at expansion time.
+- **`format` on dates.** `<pi-date format="%Y-%m" />` renders any strftime shape (`%Y %m %d %F %T %H %M %S
+  %j %V %u %w %a %A %b %B %Q %s %%`); an unknown `%` token is left as written. `ctx.date(kind, offset, format)`
+  takes it too, and `<pi-ref type="date" format="..." />` accepts it.
 - `type="number"` picks the standalone numbers in a message (`51`, `12.5` - not the `1` in `v1gate`), and
   `type="regex" pattern="..."` runs the user's own regular expression over it and returns the capture group,
   with `scope="session"` to search backwards through the whole conversation. An invalid pattern and a pattern
@@ -37,7 +40,7 @@
 - **Commands.** `/refs` lists every tag that resolves now and any config or hook problem;
   `/inline-tags status|on|off` shows the effective settings, whether the model gate matches the current model,
   and the last expansions applied.
-- **Selftest.** 40 checks against a fake pi host and real temp files (`npm test`), covering each built-in,
+- **Selftest.** 43 checks against a fake pi host and real temp files (`npm test`), covering each built-in,
   each tag shape, a throwing hook, a malformed index, `@scope/pkg` and HTML left alone, assistant message
   rewriting, user input expansion, the prompt hook, the model gate, `disableTags`, and config problem
   reporting.
