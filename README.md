@@ -11,18 +11,27 @@ A [pi](https://github.com/badlogic/pi-mono) coding-agent extension.
 ## The tags
 
 ```
-<pi-ref type="url" index="-1" />             first URL in the most recent message
-<pi-ref type="url" index="-1" number="2" />  its second URL
-<pi-ref type="url" index="7" />              first URL in message 7
-<pi-ref type="path" index="-1" />            its first path
-<pi-ref type="line" index="-1" number="3" /> its third non-empty line
-<pi-ref type="text" index="-1" />            the whole message, verbatim
+<pi-ref type="url" offset="-1" />             first URL in the most recent message
+<pi-ref type="url" offset="-1" index="2" />   its second URL
+<pi-ref type="url" offset="7" />              first URL in message 7
+<pi-ref type="path" offset="-1" />            its first path
+<pi-ref type="line" offset="-1" index="3" />  its third non-empty line
+<pi-ref type="text" offset="-1" />            the whole message, verbatim
+<pi-ref type="number" offset="-1" />          the first number in it (index="2" the second)
+<pi-ref type="regex" offset="-1" pattern="issue (\d+)" />  what your own regex captures
 <pi-date value="date" offset="+3d" />        2026-11-29  (datetime, time, today, yesterday, tomorrow, week, year)
 <pi-pr n="12" />                             a tag you defined in JSON
 ```
 
-`index` counts back from the newest (`-1`, `-2`) or names a message outright, so the reference you write stays
-correct as the conversation grows.
+**`offset` picks the message, `index` picks the entry inside it.** `offset` counts back from the newest
+(`-1`, `-2`) or names a message outright, so the reference you write stays correct as the conversation grows;
+`index` then means the second URL, the third line, the third number, the second regex match.
+
+`type="number"` takes the numbers that stand on their own (`51`, `77`, `12.5`) - the `1` inside `v1gate` or
+`a1b2c3.png` is not a number you would cite. `type="regex"` runs **your** regular expression over the message
+and returns capture group 1 (or the whole match when there is none); `scope="session"` searches backwards
+through the whole conversation instead of one message, and a pattern that is invalid or matches nothing refuses
+the call and says which it was.
 
 `pi-ref` and `pi-date` are the **only** built-in tags. The `pi-` prefix exists so a tag is never confused with
 an HTML element — `<div>`, `<span>`, `@scope/package` and email addresses are never touched. The bare spelling
@@ -39,8 +48,8 @@ Expansion happens in three places, so the real text — not the model's recollec
 If a reference cannot be resolved in a tool call, the call is refused and the reason states what does exist:
 
 ```
-A reference the call used could not be resolved: index="9" points outside the conversation -
-this session has 2 user messages (index="-1" is the most recent). Fix the reference or write the text out in full.
+A reference the call used could not be resolved: offset="9" points outside the conversation -
+this session has 2 user messages (offset="-1" is the most recent). Fix the reference or write the text out in full.
 ```
 
 ## You define the tags, in JSON
@@ -84,7 +93,7 @@ ctx.attrs           // { a: "21", b: "21" } from the element
 ctx.type, ctx.index, ctx.modifier, ctx.match
 ctx.cwd, ctx.model, ctx.env("HOME"), ctx.now()
 ctx.date("date", "+3d")            // a computed date
-ctx.message("-2", "url", "1")      // a part of a pasted message
+ctx.message("-2", "url", "1")      // a part of a pasted message (offset, type, index)
 ctx.userMessages                   // how many there are
 ```
 
@@ -150,8 +159,8 @@ text can be computed in JS rather than frozen in the config file.
 Guidance the extension injects (only for the models you list):
 
 ```
-Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" index="-1" /> is the first URL in the most recent message, …
-References available now: <pi-ref type="url" index="-1" /> = https://cdn.example.com/shots/a1b2c3.png · <pi-ref type="path" index="-2" /> = /tmp/deep/dir/report.csv
+Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" offset="-1" /> is the first URL in the most recent message, …
+References available now: <pi-ref type="url" offset="-1" /> = https://cdn.example.com/shots/a1b2c3.png · <pi-ref type="path" offset="-2" /> = /tmp/deep/dir/report.csv
 Your own tags: <pi-pr n="…" /> → template https://github.com/voorjaar/v1gate/pull/{n} · <pi-host /> → value
 ```
 
@@ -185,10 +194,11 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-26 checks against a fake pi host and real temp files: each built-in tag, each tag shape (`value`, `template`,
-`hook`, `js`, `pattern`), a throwing hook, a malformed and an out-of-range index, `@scope/pkg` and HTML left
-alone, the `@` shorthand and its switch, assistant message rewriting, your own input being expanded, the prompt
-hook, the model gate, `disableTags`, and config problem reporting.
+40 checks against a fake pi host and real temp files: every built-in type (`url`, `path`, `line`, `text`,
+`number`, `regex`, `date`, `tag`), every user tag shape (`value`, `template`, `hook`, `js`, `pattern`), a
+throwing hook, a malformed and an out-of-range `offset`, a regex that matches nothing, an invalid pattern,
+`@scope/pkg` and HTML left alone, the `@` shorthand and its switch, assistant message rewriting, your own input
+being expanded, the prompt hook, the model gate, `disableTags`, and config problem reporting.
 
 ## License
 

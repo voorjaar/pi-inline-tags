@@ -103,23 +103,23 @@ const session = makeSession(
 const first = await session.userMessage("look at this screenshot https://cdn.example.com/shots/a1b2c3.png please");
 assert(
   "guidance: the pasted link is named as a tag the model can cite",
-  first.some((line) => line.includes('<pi-ref type="url" index="-1" /> = https://cdn.example.com/shots/a1b2c3.png')),
+  first.some((line) => line.includes('<pi-ref type="url" offset="-1" /> = https://cdn.example.com/shots/a1b2c3.png')),
   first.join("\n"),
 );
 await session.userMessage("/tmp/deep/dir/report.csv\nsecond line here\nthird line here");
 
 // --- the canonical grammar in tool arguments ---------------------------------------------------------
 
-let outcome = await session.call("fetch_content", { url: '<pi-ref type="url" index="-2" />' });
-assert('tool arg: <pi-ref type="url" index="-2" /> is the URL from the message before the last', !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
+let outcome = await session.call("fetch_content", { url: '<pi-ref type="url" offset="-2" />' });
+assert('tool arg: <pi-ref type="url" offset="-2" /> is the URL from the message before the last', !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
 
-outcome = await session.call("bash", { command: "wc -l <pi-ref type=\"path\" index=\"-1\" />" });
-assert('tool arg: <pi-ref type="path" index="-1" /> resolves to the path in the newest message', !outcome.blocked && outcome.input.command === "wc -l /tmp/deep/dir/report.csv", outcome.input.command);
+outcome = await session.call("bash", { command: "wc -l <pi-ref type=\"path\" offset=\"-1\" />" });
+assert('tool arg: <pi-ref type="path" offset="-1" /> resolves to the path in the newest message', !outcome.blocked && outcome.input.command === "wc -l /tmp/deep/dir/report.csv", outcome.input.command);
 
-outcome = await session.call("bash", { command: "echo <pi-ref type=\"line\" index=\"-1\" number=\"3\" />" });
-assert('tool arg: <pi-ref type="line" number="3" /> picks that line', !outcome.blocked && outcome.input.command === "echo third line here", outcome.input.command);
+outcome = await session.call("bash", { command: "echo <pi-ref type=\"line\" offset=\"-1\" index=\"3\" />" });
+assert('tool arg: <pi-ref type="line" index="3" /> picks that line', !outcome.blocked && outcome.input.command === "echo third line here", outcome.input.command);
 
-outcome = await session.call("bash", { command: "echo <pi-ref type=\"url\" index=\"-2\" number=\"2\" />" });
+outcome = await session.call("bash", { command: "echo <pi-ref type=\"url\" offset=\"-2\" index=\"2\" />" });
 assert('tool arg: a URL with no second entry is refused with what the message has', !!outcome.blocked && /has 1 URL/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 outcome = await session.call("bash", { command: 'echo <pi-date value="date" offset="+3d" />' });
@@ -163,11 +163,11 @@ assert("tool arg: a hook that throws leaves the text alone instead of breaking t
 outcome = await session.call("bash", { command: 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>' });
 assert("tool arg: @scope/pkg and real HTML are not touched", !outcome.blocked && outcome.input.command === 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>', outcome.input.command);
 
-outcome = await session.call("fetch_content", { url: '<pi-ref type="url" index="9" />' });
-assert('tool arg: an out-of-range index is refused with the real range', !!outcome.blocked && /points outside the conversation/.test(outcome.blocked.reason) && /2 user messages/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+outcome = await session.call("fetch_content", { url: '<pi-ref type="url" offset="9" />' });
+assert('tool arg: an out-of-range offset is refused with the real range', !!outcome.blocked && /points outside the conversation/.test(outcome.blocked.reason) && /2 user messages/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
-outcome = await session.call("fetch_content", { url: '<pi-ref type="url" index="not-a-number" />' });
-assert("tool arg: a malformed index is refused with the shape it wants", !!outcome.blocked && /index must be a message number/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+outcome = await session.call("fetch_content", { url: '<pi-ref type="url" offset="not-a-number" />' });
+assert("tool arg: a malformed offset is refused with the shape it wants", !!outcome.blocked && /offset must be a message offset/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 // --- aliases and the @ shorthand ----------------------------------------------------------------------
 
@@ -185,8 +185,8 @@ assert("@ shorthand: atSyntax=false turns only the shorthand off", !outcome.bloc
 // --- the model's own messages and what you type -----------------------------------------------------
 
 const replaced = await session.assistant([
-  { type: "text", text: "I fetched <pi-ref type=\"url\" index=\"-2\" /> and saved it." },
-  { type: "toolCall", name: "read", arguments: { path: '<pi-ref type="path" index="-1" />' } },
+  { type: "text", text: "I fetched <pi-ref type=\"url\" offset=\"-2\" /> and saved it." },
+  { type: "toolCall", name: "read", arguments: { path: '<pi-ref type="path" offset="-1" />' } },
 ]);
 assert(
   "assistant message: the stored text and tool args carry the real strings",
@@ -194,7 +194,7 @@ assert(
   JSON.stringify(replaced),
 );
 
-const transformed = await session.typed('open <pi-ref type="url" index="-2" /> today');
+const transformed = await session.typed('open <pi-ref type="url" offset="-2" /> today');
 assert("user input: what you type is expanded too", transformed?.action === "transform" && transformed.text === "open https://cdn.example.com/shots/a1b2c3.png today", JSON.stringify(transformed));
 
 // --- prompt hook, tag summaries, gate, and config reporting ------------------------------------------
@@ -220,8 +220,8 @@ assert("config: a tag whose js does not parse is reported, not silently dropped"
 
 const disabled = makeSession("off.json", { enabled: false });
 await disabled.userMessage("https://example.com/y");
-outcome = await disabled.call("fetch_content", { url: '<pi-ref type="url" index="-1" />' });
-assert("config: enabled=false turns expansion off", !outcome.blocked && outcome.input.url === '<pi-ref type="url" index="-1" />', outcome.input.url);
+outcome = await disabled.call("fetch_content", { url: '<pi-ref type="url" offset="-1" />' });
+assert("config: enabled=false turns expansion off", !outcome.blocked && outcome.input.url === '<pi-ref type="url" offset="-1" />', outcome.input.url);
 
 const trimmed = makeSession("trim.json", { disableTags: ["date"] });
 await trimmed.userMessage("x");
@@ -232,6 +232,34 @@ const unknown = makeSession("plain.json", {});
 await unknown.userMessage("x");
 outcome = await unknown.call("bash", { command: "echo <whatever />" });
 assert("an undeclared tag name is left alone, not guessed at", !outcome.blocked && outcome.input.command === "echo <whatever />", outcome.input.command);
+
+// --- numbers and your own regex ---------------------------------------------------------------------
+
+await session.userMessage("fix v1gate issue 51 and issue 77, memory budget 12.5 GB");
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="number" offset="-1" />' });
+assert('tool arg: <pi-ref type="number" /> picks the first number in that message', !outcome.blocked && outcome.input.command === "echo 51", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="number" offset="-1" index="3" />' });
+assert('tool arg: <pi-ref type="number" index="3" /> picks the third, decimals included', !outcome.blocked && outcome.input.command === "echo 12.5", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="number" offset="-1" index="9" />' });
+assert("tool arg: a number that is not there is refused with how many were found", !!outcome.blocked && /no 9th number in message 3/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" offset="-1" pattern="issue (\\d+)" />' });
+assert('tool arg: <pi-ref type="regex" /> returns the capture group', !outcome.blocked && outcome.input.command === "echo 51", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" offset="-1" index="2" pattern="issue (\\d+)" />' });
+assert('tool arg: index picks the second regex match', !outcome.blocked && outcome.input.command === "echo 77", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" scope="session" pattern="(\\d+\\.\\d+) GB" />' });
+assert('tool arg: scope="session" searches back through the conversation', !outcome.blocked && outcome.input.command === "echo 12.5", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" offset="-1" pattern="gate#(\\d+)" />' });
+assert("tool arg: a regex that matches nothing says so", !!outcome.blocked && /matched nothing in message 3/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-ref type="regex" offset="-1" pattern="([\\d+" />' });
+assert("tool arg: an invalid pattern is refused as invalid", !!outcome.blocked && /not a valid regular expression/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 console.log(`\n${failures === 0 ? "SELFTEST PASSED" : "SELFTEST FAILED"} (${failures} failing)`);
 process.exit(failures === 0 ? 0 : 1);

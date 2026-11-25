@@ -7,15 +7,18 @@
  * the conversation. So this extension remembers the conversation's own inputs and resolves a small inline
  * marker to the real text:
  *
- *   <pi-ref type="url" index="-1" />         the first URL in the most recent message (-2 is the one before)
- *   <pi-ref type="url" index="-1" number="2" />  its second URL
- *   <pi-ref type="path" index="7" />         the first path in message 7
- *   <pi-ref type="line" index="-1" number="3" /> its third non-empty line
- *   <pi-ref type="text" index="-1" />        the whole message, verbatim
+ *   <pi-ref type="url" offset="-1" />          the first URL in the most recent message (-2 is the one before)
+ *   <pi-ref type="url" offset="-1" index="2" />  its second URL
+ *   <pi-ref type="path" offset="7" />          the first path in message 7
+ *   <pi-ref type="line" offset="-1" index="3" /> its third non-empty line
+ *   <pi-ref type="text" offset="-1" />         the whole message, verbatim
+ *   <pi-ref type="number" offset="-1" />      the first number in it (index="2" the second)
+ *   <pi-ref type="regex" offset="-1" pattern="issue (\\d+)" />  what your own regex captures
  *   <pi-date value="date" offset="+3d" />    a computed date
  *   <pi-pr n="12" />                        a tag you defined in JSON
  *
- * `pi-ref` and `pi-date` are the only built-in tags. Every other tag name is yours, declared in `tags` by its
+ * `offset` picks the message, `index` picks the entry inside it. `pi-ref` and `pi-date` are the only built-in
+ * tags. Every other tag name is yours, declared in `tags` by its
  * bare name (`"pr"` is written `<pi-pr />`), and its text can be a literal, a template, a hook, or JavaScript
  * you wrote in the JSON itself. The `pi-` prefix exists so a tag is never confused with an HTML element; the
  * bare spelling still works.
@@ -106,6 +109,7 @@ type TagContext = {
   name: string;
   attrs: Record<string, string>;
   type?: string;
+  offset?: string;
   index?: string;
   modifier?: string;
   match?: string;
@@ -344,6 +348,11 @@ function captureMessage(text: string, n: number): UserMessage {
   return { n, text, urls, paths };
 }
 
+/** Numbers that stand on their own: the `1` in `v1gate` or `a1b2c3.png` is not a number you would cite. */
+function numbersOf(text: string): string[] {
+  return (text.match(/(?<![A-Za-z0-9_.])-?\d[\d,]*(?:\.\d+)?/g) ?? []).map((value) => value.replace(/,/g, "")).slice(0, 40);
+}
+
 function linesOf(message: UserMessage): string[] {
   return message.text.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
 }
@@ -559,8 +568,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const requested = Number(userMatch[1]);
       const n = requested > 0 ? requested : userMessages.length + requested + 1;
       const message = userMessages[n - 1];
-      const range = `this session has ${userMessages.length} user message${userMessages.length === 1 ? "" : "s"} (index="-1" is the most recent)`;
-      if (!message || n < 1) return { missing: `index="${userMatch[1]}" points outside the conversation - ${range}` };
+      const range = `this session has ${userMessages.length} user message${userMessages.length === 1 ? "" : "s"} (offset="-1" is the most recent)`;
+      if (!message || n < 1) return { missing: `offset="${userMatch[1]}" points outside the conversation - ${range}` };
       // "url2" and "line3" carry their ordinal inside the part name.
       const rawPart = userMatch[2] ?? "";
       const part = rawPart.replace(/\d+$/, "");
@@ -568,7 +577,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (!part || part === "text") return { value: message.text.trim().slice(0, MAX_REF_VALUE_CHARS) };
       if (part === "url") {
         const url = message.urls[ordinal - 1];
-        return url ? { value: url } : { missing: `message ${n} has ${message.urls.length} URL${message.urls.length === 1 ? "" : "s"}, so number="${ordinal}" resolves to nothing` };
+        return url ? { value: url } : { missing: `message ${n} has ${message.urls.length} URL${message.urls.length === 1 ? "" : "s"}, so index="${ordinal}" resolves to nothing` };
       }
       if (part === "path") {
         const found = message.paths[ordinal - 1];
@@ -641,6 +650,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     name: spec.name,
     attrs,
     type: attrs.type,
+    offset: attrs.offset,
     index: attrs.index,
     modifier: attrs.modifier ?? attrs.offset,
     match: attrs.match,
@@ -649,13 +659,13 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     env: (name: string) => process.env[name],
     now: () => new Date().toISOString(),
     date: (kind = "date", offset?: string) => dateValue(kind, offset) ?? dateValue("date") ?? "",
-    message: (index = "-1", type = "text", number?: string) => {
-      const requested = Number(index);
+    message: (offset = "-1", type = "text", index?: string) => {
+      const requested = Number(offset);
       const n = Number.isFinite(requested) ? (requested > 0 ? requested : userMessages.length + requested + 1) : userMessages.length;
       const message = userMessages[n - 1];
       if (!message) return "";
-      if (type === "url" || type === "path") return (type === "url" ? message.urls : message.paths)[Number(number ?? "1") - 1] ?? "";
-      if (type === "line") return linesOf(message)[Number(number ?? "1") - 1] ?? "";
+      if (type === "url" || type === "path") return (type === "url" ? message.urls : message.paths)[Number(index ?? "1") - 1] ?? "";
+      if (type === "line") return linesOf(message)[Number(index ?? "1") - 1] ?? "";
       return message.text.trim();
     },
     userMessages: userMessages.length,
@@ -692,20 +702,73 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return value;
   };
 
+  const resolveDirect = (request: DirectRequest, attrs: Record<string, string>): { value?: string; missing?: string } => {
+    const offset = attrs.offset ?? attrs.message ?? "-1";
+    if (!/^-?\d+$/.test(offset)) return { missing: `offset="${offset}" must be a message offset (offset="-1" is the most recent)` };
+    const requested = Number(offset);
+    const n = requested > 0 ? requested : userMessages.length + requested + 1;
+    const scope = (attrs.scope ?? "message").toLowerCase();
+    const messages = scope === "session"
+      ? [...userMessages].reverse()
+      : userMessages[n - 1]
+        ? [userMessages[n - 1]!]
+        : [];
+    if (messages.length === 0) {
+      return { missing: `offset="${offset}" points outside the conversation - this session has ${userMessages.length} user message${userMessages.length === 1 ? "" : "s"}` };
+    }
+    const where = scope === "session" ? "this session" : `message ${n}`;
+    const ordinal = Number(attrs.index ?? "1") || 1;
+
+    if (request.kind === "number") {
+      const found = messages.flatMap((message) => numbersOf(message.text));
+      const value = found[ordinal - 1];
+      return value
+        ? { value }
+        : { missing: `no ${ordinal}${ordinal === 1 ? "st" : ordinal === 2 ? "nd" : ordinal === 3 ? "rd" : "th"} number in ${where} (${found.length} found)` };
+    }
+
+    const pattern = attrs.pattern ?? attrs.source;
+    if (!pattern) return { missing: '<pi-ref type="regex" /> needs pattern="…"' };
+    if (pattern.length > MAX_PATTERN_CHARS) return { missing: `pattern is longer than ${MAX_PATTERN_CHARS} characters` };
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, "g");
+    } catch (error) {
+      return { missing: `pattern="${pattern}" is not a valid regular expression: ${String(error)}` };
+    }
+    const matches: string[] = [];
+    for (const message of messages) {
+      for (const match of message.text.matchAll(regex)) {
+        matches.push(match[1] ?? match[0]);
+        if (matches.length >= ordinal) break;
+      }
+      if (matches.length >= ordinal) break;
+    }
+    const value = matches[ordinal - 1];
+    return value
+      ? { value: value.slice(0, MAX_REF_VALUE_CHARS) }
+      : { missing: `pattern="${pattern}" matched nothing in ${where}` };
+  };
+
   const depthOf = (_attrs: Record<string, string>): number => 0;
 
-  const resolveBuiltinElement = (tag: string, attrs: Record<string, string>): { token?: string; error?: string } => {
+  type DirectRequest = { kind: "number" | "regex"; attrs: Record<string, string> };
+
+  const resolveBuiltinElement = (tag: string, attrs: Record<string, string>): { token?: string; error?: string; direct?: DirectRequest } => {
     switch (tag) {
       case "ref": {
         // Canonical: <ref type="url" index="-1" /> - explicit about what and which message.
         const type = (attrs.type ?? "").toLowerCase();
-        const index = attrs.index ?? attrs.n ?? attrs.message ?? "-1";
-        if (!/^-?\d+$/.test(index)) return { error: `<ref type="${type}" index="${index}" /> - index must be a message number, or negative to count back from the most recent (-1)` };
-        const number = attrs.number ?? attrs.ordinal ?? "";
-        if (type === "url" || type === "path") return { token: `u${index}.${type}${number}` };
-        if (type === "line") return { token: `u${index}.line${number || "1"}` };
-        if (type === "text" || type === "message" || type === "full") return { token: `u${index}.text` };
+        // offset = which message (-1 is the most recent), index = which entry inside that message.
         if (type === "date") return { token: `${attrs.value ?? "date"}${attrs.offset ?? ""}` };
+        const offset = attrs.offset ?? attrs.message ?? "-1";
+        if (!/^-?\d+$/.test(offset)) return { error: `<pi-ref type="${type}" offset="${offset}" /> - offset must be a message offset, negative to count back from the most recent (-1)` };
+        const ordinal = attrs.index ?? "";
+        if (type === "url" || type === "path") return { token: `u${offset}.${type}${ordinal}` };
+        if (type === "line") return { token: `u${offset}.line${ordinal || "1"}` };
+        if (type === "text" || type === "message" || type === "full") return { token: `u${offset}.text` };
+        if (type === "number") return { direct: { kind: "number", attrs } };
+        if (type === "regex") return { direct: { kind: "regex", attrs } };
         if (type === "tag" || type === "config") {
           const name = attrs.name ?? attrs.ref;
           if (!name) return { error: `<ref type="${type}" /> needs name="..."` };
@@ -742,7 +805,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   async function expandText(text: string, depth: number, ctx: ExtensionContext | undefined): Promise<ExpandOutcome> {
     const used: string[] = [];
     const missing: string[] = [];
-    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; attrs: Record<string, string>; error?: string };
+    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; direct?: DirectRequest; attrs: Record<string, string>; error?: string };
     const candidates: Candidate[] = [];
 
     if (elementScanner && text.includes("<")) {
@@ -757,7 +820,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
           continue;
         }
         const request = resolveBuiltinElement(written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written, attrs);
-        candidates.push({ start, end: start + match[0].length, attrs, token: request.token, error: request.error });
+        candidates.push({ start, end: start + match[0].length, attrs, token: request.token, error: request.error, direct: request.direct });
       }
     }
 
@@ -803,7 +866,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       }
       const resolved = candidate.spec
         ? await resolveSpec(candidate.spec, candidate.attrs, ctx)
-        : await resolveToken(candidate.token ?? "", candidate.attrs, depth, ctx);
+        : candidate.direct
+          ? resolveDirect(candidate.direct, candidate.attrs)
+          : await resolveToken(candidate.token ?? "", candidate.attrs, depth, ctx);
       if (resolved.value !== undefined) {
         out += resolved.value;
         used.push(original);
@@ -855,9 +920,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const back = -(total - message.n + 1);
       const lines: string[] = [];
       message.urls.slice(0, 2).forEach((url, position) => {
-        lines.push(`<${TAG_PREFIX}ref type="url" index="${back}"${position === 0 ? "" : ` number="${position + 1}"`} /> = ${url.slice(0, MAX_INDEX_LINE_CHARS)}`);
+        lines.push(`<${TAG_PREFIX}ref type="url" offset="${back}"${position === 0 ? "" : ` index="${position + 1}"`} /> = ${url.slice(0, MAX_INDEX_LINE_CHARS)}`);
       });
-      message.paths.slice(0, 1).forEach((path) => lines.push(`<${TAG_PREFIX}ref type="path" index="${back}" /> = ${path.slice(0, MAX_INDEX_LINE_CHARS)}`));
+      message.paths.slice(0, 1).forEach((path) => lines.push(`<${TAG_PREFIX}ref type="path" offset="${back}" /> = ${path.slice(0, MAX_INDEX_LINE_CHARS)}`));
       return lines;
     });
   };
@@ -885,7 +950,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const options = (event as { systemPromptOptions?: { promptGuidelines?: string[] } }).systemPromptOptions;
     if (!options) return;
     const guidelines: string[] = [
-      'Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" index="-1" /> is the first URL in the most recent message (index="-2" is the one before), <pi-ref type="path" index="-1" /> its first path, <pi-ref type="line" index="-1" number="3" /> its third line, <pi-ref type="text" index="-1" /> the whole message, <pi-date value="date" offset="+3d" /> a computed date, <pi-pr n="12" /> a tag the user defined in config.',
+      'Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" offset="-1" /> is the first URL in the most recent message (offset="-2" is the one before), <pi-ref type="url" offset="-1" index="2" /> its second URL, <pi-ref type="path" offset="-1" /> its first path, <pi-ref type="line" offset="-1" index="3" /> its third line, <pi-ref type="text" offset="-1" /> the whole message, <pi-ref type="number" offset="-1" index="2" /> the second number in it, <pi-ref type="regex" offset="-1" pattern="gate#(\\d+)" /> what your own regex captures, <pi-date value="date" offset="+3d" /> a computed date, <pi-pr n="12" /> a tag the user defined in config.',
     ];
     const index = refIndexLines();
     if (index.length > 0) guidelines.push(`References available now: ${index.join(" · ")}`);
@@ -959,7 +1024,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         block: true,
         reason:
           `A reference the call used could not be resolved: ${[...new Set(result.missing)].join("; ")}. ` +
-          `User messages are addressed as <pi-ref type="url" index="-1" /> (most recent) … index="-${userMessages.length}"; ` +
+          `User messages are addressed as <pi-ref type="url" offset="-1" /> (most recent) … offset="-${userMessages.length}"; ` +
           `dates are <pi-date value="date|datetime|time|today|yesterday|tomorrow|week|year" offset="+3d|-2h|+10m|+1w" />` +
           (own.length > 0 ? `; your tags: ${own.map((name) => `<${name} />`).join(", ")}` : "") +
           ". Fix the reference or write the text out in full.",
@@ -976,7 +1041,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const own = [...userTagSummaries(), ...[...hooks.keys()].filter((name) => !Object.values(config.tags).some((spec) => (spec.hook ?? spec.name) === name)).map((name) => `<pi-ref type="tag" name="${name}" /> (hook only)`)];
       ctx.ui.notify(
         [
-          `user messages: ${userMessages.length} → <pi-ref type="url" index="-1" /> is the newest, index="-${userMessages.length}" the oldest`,
+          `user messages: ${userMessages.length} → <pi-ref type="url" offset="-1" /> is the newest, offset="-${userMessages.length}" the oldest`,
           lines.length > 0 ? `links and paths seen:\n${lines.map((line) => `  ${line}`).join("\n")}` : "no URLs or paths pasted yet",
           own.length > 0 ? `yours:\n${own.map((line) => `  ${line}`).join("\n")}` : "no tags or hooks configured",
           `dates: <pi-date value="date|datetime|time|today|yesterday|tomorrow|week|year" offset="+3d|-2h|+10m|+1w" /> (or <pi-ref type="date" ... />)`,
