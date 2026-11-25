@@ -1,0 +1,46 @@
+{
+  "name": "pi-inline-tags",
+  "version": "0.1.0",
+  "description": "Inline reference tags for pi: <ref u=\"7.url\" />, <date offset=\"+3d\" />, your own tags (value, template, hook, or your own regex), and JS hooks that return text - so the agent cites what you pasted instead of retyping it.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "node --experimental-strip-types selftest.mjs"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "coding-agent",
+    "inline-tags",
+    "references",
+    "prompt-hook",
+    "user-defined-tags",
+    "tool-call-arguments"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "author": {
+    "name": "voorjaar",
+    "email": "felitas@zoho.com",
+    "url": "https://github.com/voorjaar"
+  },
+  "homepage": "https://github.com/voorjaar/pi-inline-tags#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voorjaar/pi-inline-tags.git"
+  },
+  "bugs": {
+    "url": "https://github.com/voorjaar/pi-inline-tags/issues"
+  },
+  "license": "MIT"
+}
