@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0
+
+The tags that stop the agent guessing things it should have read from the session.
+
+- **`<pi-file pattern="bench/*.py" index="1" />`** resolves a glob to a file that really exists
+  (`sort="recent|name"`, `absolute="true"`, `all="true"`), which is the largest family of failed `read`/`bash`
+  calls: invented paths. Bounded walk (4000 files, depth 8, `node_modules`/`.git`/`dist` skipped).
+- **`<pi-task />`** reads the project's background tasks from `.pi/tasks/<run>/<id>.json` and returns the id,
+  name, status, command, output path, exit code, or age, filtered by `status=` and `match=`.
+- **`<pi-tool index="2" />` and `<pi-tools match="web" />`** name tools the session actually has
+  (`part="name|description"`, `scope="active|registered"`), instead of the ones the model remembers.
+- **`<pi-repo part="root|branch|head|remote|dirty" />`** and **`<pi-session part="id|model|cwd|os|…" />`** —
+  the repository and the session, read from git and from pi's own session manager.
+- **`<pi-history pattern="eval_suite" />`** returns an earlier tool call's command; **`<pi-result
+  pattern="prefill" context="240" />`** returns what an earlier call produced, as a window around the match
+  (`full="true"`, `error="true"`, `part="tool"`).
+- **`<pi-env name="HF_ENDPOINT" default="" />`** and **`<pi-skill name="…" file="…" />`** (extra roots via
+  `skillRoots`).
+- **`<pi-var name="mini" value="…" />` / `<pi-var name="mini" />`** — the agent names a thing once and reuses
+  it. The stored text may itself contain tags, so a variable can hold a reference. `append=`, `unset=`,
+  `persist="true"` (writes `.pi/pi-inline-vars.json`), `<pi-vars />` lists them, and `"vars"` in the config
+  seeds them.
+- **User tags now carry a `description`**, and the prompt injects one line per built-in in the exact form to
+  write plus every user tag with its description, so the model learns the vocabulary instead of guessing it.
+- **Removed: the `@` shorthand (`atSyntax`) and `<pi-ref type="tag">`** with its `u=` / `date=` / `name=`
+  aliases. One grammar now: `<pi-… attr="…" />`. A hook function in the hooks file is callable as a tag
+  (`due` in the file means `<pi-due modifier="+3d" />`).
+- **Fix: tool calls were expanded without the session context**, so `cwd`, session id, model, history and
+  results were unreachable from a tool argument.
+- **Fix: an element may now sit inside an attribute value** (`value="<pi-ref type='url' />"`), because the
+  scanner matches quoted runs before it excludes `>`.
+- **Selftest.** 88 checks
 ## 0.1.0
 
 - **Inline reference tags.** `<pi-ref type="url" offset="-1" />` resolves to the first URL in the most recent

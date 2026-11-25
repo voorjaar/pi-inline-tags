@@ -19,6 +19,56 @@ A [pi](https://github.com/badlogic/pi-mono) coding-agent extension.
 <pi-ref type="text" offset="-1" />            the whole message, verbatim
 <pi-ref type="number" offset="-1" />          the first number in it (index="2" the second)
 <pi-ref type="regex" offset="-1" pattern="issue (\d+)" />  what your own regex captures
+<pi-date value="date" offset="+3d" />         2026-11-29  (datetime, time, today, yesterday, tomorrow, week, year)
+<pi-date format="%Y-%m" />                    any strftime shape: %Y %m %d %F %T %H %M %S %j %V %u %A %B %Q %s
+```
+
+What the session already knows, so the agent stops guessing it:
+
+```
+<pi-file pattern="bench/*.py" index="1" />                         a path that really exists (sort="recent|name", absolute="true", all="true")
+<pi-task status="running" />                                      a background task id of this project
+<pi-task match="bench" part="id|name|status|command|output|exit|age" />   which piece of it you want
+<pi-tool index="2" />  <pi-tools match="web" />                   a tool this session actually has (part="name|description", scope="active|registered")
+<pi-repo part="root|branch|head|remote|dirty" />                  the git repository, branch, HEAD
+<pi-session part="id|name|model|provider|cwd|dir|file|os" />      this session id, model, working directory
+<pi-history pattern="eval_suite" part="command|tool|args" />      an earlier tool call, so it is not retyped
+<pi-result pattern="prefill" context="240" full="true" />         what an earlier tool call returned
+<pi-env name="HF_ENDPOINT" default="" />                          an environment variable's value
+<pi-skill name="lilypond-music" file="scripts/x.py" />            an installed skill's absolute path
+<pi-var name="mini" value="ssh macminister.local" />              name a thing once…
+<pi-var name="mini" />                                            …and use it as many times as you like
+<pi-var name="mini" append="true" />  <pi-var name="mini" unset="true" />  add a line, remove it
+<pi-vars />                                                       list what the agent named
+<pi-pr n="12" />                                                  a tag you defined in JSON
+```
+
+**`offset` picks the message, `index` picks the entry inside it.** `offset` counts back from the newest
+(`-1`, `-2`) or names a message outright, so the reference you write stays correct as the conversation grows;
+`index` then means the second URL, the third line, the third number, the second regex match.
+
+`type="number"` takes the numbers that stand on their own (`51`, `77`, `12.5`) - the `1` inside `v1gate` or
+`a1b2c3.png` is not a number you would cite. `type="regex"` runs **your** regular expression over the message
+and returns capture group 1 (or the whole match when there is none); `scope="session"` searches backwards
+through the whole conversation instead of one message, and a pattern that is invalid or matches nothing refuses
+the call and says which it was.
+
+**`pi-var` is the agent's own scratch space.** It names a thing once (`<pi-var name="mini" value="ssh
+macminister.local" />`) and reuses it; the stored text may itself contain tags, so a variable can hold a
+reference. `persist="true"` writes it to `.pi/pi-inline-vars.json` in the project so the next session starts
+with it, and `"vars"` in the config seeds variables.
+
+## The tags
+
+```
+<pi-ref type="url" offset="-1" />             first URL in the most recent message
+<pi-ref type="url" offset="-1" index="2" />   its second URL
+<pi-ref type="url" offset="7" />              first URL in message 7
+<pi-ref type="path" offset="-1" />            its first path
+<pi-ref type="line" offset="-1" index="3" />  its third non-empty line
+<pi-ref type="text" offset="-1" />            the whole message, verbatim
+<pi-ref type="number" offset="-1" />          the first number in it (index="2" the second)
+<pi-ref type="regex" offset="-1" pattern="issue (\d+)" />  what your own regex captures
 <pi-date value="date" offset="+3d" />        2026-11-29  (datetime, time, today, yesterday, tomorrow, week, year)
 <pi-date format="%Y-%m" />                   any strftime shape: %Y %m %d %F %T %H %M %S %j %V %u %A %B %Q %s
 <pi-pr n="12" />                             a tag you defined in JSON
@@ -34,7 +84,8 @@ and returns capture group 1 (or the whole match when there is none); `scope="ses
 through the whole conversation instead of one message, and a pattern that is invalid or matches nothing refuses
 the call and says which it was.
 
-`pi-ref` and `pi-date` are the **only** built-in tags. The `pi-` prefix exists so a tag is never confused with
+`Every built-in refuses loudly when it finds nothing, and the refusal names what does exist — a guess is only
+useful if a wrong one is visible. The `pi-` prefix exists so a tag is never confused with
 an HTML element — `<div>`, `<span>`, `@scope/package` and email addresses are never touched. The bare spelling
 (`<ref type="url" />`) resolves too; an undeclared name (`<whatever />`) is left alone rather than guessed at.
 
@@ -60,8 +111,8 @@ Write the name bare in config, use it with the prefix in text:
 ```json
 {
   "tags": {
-    "host":   { "value": "ssh macminister.local" },
-    "pr":     { "template": "https://github.com/voorjaar/v1gate/pull/{n}", "attrs": ["n"] },
+    "host":   { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" },
+    "pr":     { "template": "https://github.com/voorjaar/v1gate/pull/{n}", "attrs": ["n"], "description": "a v1gate pull request" },
     "shot":   { "hook": "screenshot", "attrs": ["days"] },
     "due":    { "js": "return ctx.date('date', '+3d')" },
     "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.local/t/{1}" }
@@ -132,7 +183,6 @@ text can be computed in JS rather than frozen in the config file.
   "enabled": true,
   "models": ["qwen3.8", "strata"],
   "refIndexSize": 6,
-  "atSyntax": true,
   "expandToolCalls": true,
   "expandAssistant": true,
   "expandUserInput": true,
@@ -141,7 +191,9 @@ text can be computed in JS rather than frozen in the config file.
   "hookTimeoutMs": 2000,
   "hookCacheSeconds": 5,
   "disableTags": ["date"],
-  "tags": { "host": { "value": "ssh macminister.local" } }
+  "skillRoots": ["~/my-skills"],
+  "vars": { "box": "macminister.local" },
+  "tags": { "host": { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" } }
 }
 ```
 
@@ -150,19 +202,24 @@ text can be computed in JS rather than frozen in the config file.
 | `enabled` | master switch; `PI_INLINE_TAGS=off` overrides it |
 | `models` | substrings matched against `provider/modelId` for the **guidance only**; empty means every model. Resolution always runs when enabled |
 | `refIndexSize` | how many pasted links/paths to name in the prompt so the model knows which index to cite (0 disables) |
-| `atSyntax` | also resolve the `@u7.url` / `@date+3d` / `@name` shorthand |
 | `expandToolCalls` / `expandAssistant` / `expandUserInput` | which surfaces get expanded |
 | `promptHook` | a hook whose returned text is appended to the system prompt |
 | `hooksFile` | JS module for hooks and tags |
 | `hookTimeoutMs`, `hookCacheSeconds` | per-call bound and how long a result is reused |
-| `tags`, `disableTags` | your own tags; defaults to remove |
+| `tags`, `disableTags` | your own tags; defaults to remove. A tag's `description` is shown to the model |
+| `skillRoots` | extra directories `<pi-skill />` searches (after these: `<cwd>/.pi/skills`, `~/.pi/agent/skills`, `~/.agents/skills`, `~/.claude/skills`) |
+| `vars` | variables that start defined, so `<pi-var name="box" />` resolves from the first message |
 
-Guidance the extension injects (only for the models you list):
+Guidance the extension injects (only for the models you list): one line per built-in in the exact form to
+write, then the links and paths actually pasted in this session, then your own tags with their descriptions:
 
 ```
-Use inline reference tags instead of retyping what the user pasted: <pi-ref type="url" offset="-1" /> is the first URL in the most recent message, …
+Inline tags resolve to real text at the moment the call runs - use them instead of retyping URLs, paths, task ids, tool names, or dates you have already seen.
+<pi-ref type="url|path|line|text|number|regex|date" offset="-1" index="2" pattern="…" format="%Y-%m" scope="session" /> - a part of what the user pasted (offset picks the message, index the entry inside it)
+<pi-file pattern="bench/*.py" index="1" sort="recent|name" absolute="true" all="true" /> - a path that really exists on disk instead of one you invented
+<pi-task status="running" match="bench" part="id|name|status|command|output|exit|age" all="true" /> - a background task of this project
 References available now: <pi-ref type="url" offset="-1" /> = https://cdn.example.com/shots/a1b2c3.png · <pi-ref type="path" offset="-2" /> = /tmp/deep/dir/report.csv
-Your own tags: <pi-pr n="…" /> → template https://github.com/voorjaar/v1gate/pull/{n} · <pi-host /> → value
+the mac mini every bench command runs on - <pi-host /> (fixed text: ssh macminister.local) · a v1gate pull request - <pi-pr n="…" /> (template https://github.com/voorjaar/v1gate/pull/{n})
 ```
 
 ## Commands
@@ -195,11 +252,13 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-43 checks against a fake pi host and real temp files: every built-in type (`url`, `path`, `line`, `text`,
-`number`, `regex`, `date`, `tag`), every user tag shape (`value`, `template`, `hook`, `js`, `pattern`), a
-throwing hook, a malformed and an out-of-range `offset`, a regex that matches nothing, an invalid pattern,
-`@scope/pkg` and HTML left alone, the `@` shorthand and its switch, assistant message rewriting, your own input
-being expanded, the prompt hook, the model gate, `disableTags`, and config problem reporting.
+88 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+`format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`, `var`/`vars`
+including a value that contains a tag and `persist` writing to `.pi/`), every user tag shape (`value`,
+`template`, `hook`, `js`, `pattern`), a throwing hook, a malformed and an out-of-range `offset`, a regex that
+matches nothing, an invalid pattern, `@scope/pkg` and HTML left alone, assistant message rewriting, your own
+input being expanded, the prompt hook, the model gate, `disableTags`, guidance carrying every tag and its
+description, and config problem reporting.
 
 ## License
 

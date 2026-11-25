@@ -1,6 +1,6 @@
 // Standalone harness: fake pi host + real temp files, drives the real index.ts.
 // Run: node --experimental-strip-types selftest.mjs
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import piInlineTags from "./index.ts";
@@ -17,7 +17,7 @@ function assert(label, condition, detail = "") {
   console.log(`FAIL ${label}${detail ? `\n     ${detail}` : ""}`);
 }
 
-function makeSession(name, configBody, hooksSource) {
+function makeSession(name, configBody, hooksSource, cwdOverride) {
   const configPath = join(sandbox, name);
   writeFileSync(configPath, JSON.stringify(configBody));
   if (hooksSource !== undefined) writeFileSync(join(sandbox, "pi-inline-tags.hooks.js"), hooksSource);
@@ -35,8 +35,28 @@ function makeSession(name, configBody, hooksSource) {
       commands[name] = def;
     },
   };
+  pi.getActiveTools = () => ["bash", "read", "edit", "fetch_content", "web_search"];
+  pi.getAllTools = () => [
+    { name: "bash", description: "Run a shell command" },
+    { name: "read", description: "Read a file" },
+    { name: "edit", description: "Edit a file with exact replacements" },
+    { name: "fetch_content", description: "Fetch a URL or a local file" },
+    { name: "web_search", description: "Search the web for sources" },
+    { name: "sleep", description: "registered but not active in this session" },
+  ];
   piInlineTags(pi);
-  const ctx = { model: { provider: "strata", id: "qwen3.8-flash-next" }, ui: { notify: (text) => notices.push(text) } };
+  const entries = [];
+  const ctx = {
+    model: { provider: "strata", id: "qwen3.8-flash-next" },
+    ui: { notify: (text) => notices.push(text) },
+    cwd: cwdOverride ?? sandbox,
+    sessionManager: {
+      getSessionId: () => "01a203bb-c952-707e",
+      getSessionName: () => "bench night",
+      getSessionDir: () => join(sandbox, "sessions"),
+      getEntries: () => entries,
+    },
+  };
 
   const call = async (toolName, input) => {
     let blocked;
@@ -67,7 +87,8 @@ function makeSession(name, configBody, hooksSource) {
     }
     return outcome;
   };
-  return { commands, notices, ctx, call, userMessage, assistant, typed };
+  const record = (message) => entries.push({ type: "message", id: `e${entries.length}`, parentId: null, timestamp: new Date().toISOString(), message });
+  return { commands, notices, ctx, call, userMessage, assistant, typed, record };
 }
 
 const hooksSource = `
@@ -151,14 +172,14 @@ assert("tool arg: a js tag can read the conversation through ctx.message", !outc
 outcome = await session.call("fetch_content", { url: "[[ticket 42]]" });
 assert("tool arg: a user-defined pattern tag is matched and filled", !outcome.blocked && outcome.input.url === "https://tracker.local/t/42", outcome.input.url);
 
-outcome = await session.call("bash", { command: 'echo <pi-ref type="tag" name="due" modifier="+3d" />' });
+outcome = await session.call("bash", { command: 'echo <pi-due modifier="+3d" />' });
 assert("tool arg: a JS hook from the hooks file returns the text", !outcome.blocked && outcome.input.command === "echo due:+3d", outcome.input.command);
 
 outcome = await session.call("bash", { command: "echo <shot days=\"2\" />" });
 assert("tool arg: an async hook receives the element attributes", !outcome.blocked && outcome.input.command === "echo shot:2", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-ref type="tag" name="boom" />' });
-assert("tool arg: a hook that throws leaves the text alone instead of breaking the call", !outcome.blocked && outcome.input.command === 'echo <pi-ref type="tag" name="boom" />', outcome.input.command);
+outcome = await session.call("bash", { command: "echo <pi-boom />" });
+assert("tool arg: a hook that throws leaves the text alone instead of breaking the call", !outcome.blocked && outcome.input.command === "echo <pi-boom />", outcome.input.command);
 
 outcome = await session.call("bash", { command: 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>' });
 assert("tool arg: @scope/pkg and real HTML are not touched", !outcome.blocked && outcome.input.command === 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>', outcome.input.command);
@@ -169,18 +190,13 @@ assert('tool arg: an out-of-range offset is refused with the real range', !!outc
 outcome = await session.call("fetch_content", { url: '<pi-ref type="url" offset="not-a-number" />' });
 assert("tool arg: a malformed offset is refused with the shape it wants", !!outcome.blocked && /offset must be a message offset/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
-// --- aliases and the @ shorthand ----------------------------------------------------------------------
-
-outcome = await session.call("fetch_content", { url: '<ref u="1.url" />' });
-assert('alias: <ref u="1.url" /> still resolves', !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
+// --- no @ shorthand: only the element grammar ---------------------------------------------------------
 
 outcome = await session.call("fetch_content", { url: "@u1.url" });
-assert("@ shorthand: @u1.url still resolves", !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
+assert("@ is no longer a reference form - it stays exactly as written", !outcome.blocked && outcome.input.url === "@u1.url", outcome.input.url);
 
-const noAt = makeSession("noat.json", { atSyntax: false });
-await noAt.userMessage("link https://example.com/a");
-outcome = await noAt.call("fetch_content", { url: "@u1.url" });
-assert("@ shorthand: atSyntax=false turns only the shorthand off", !outcome.blocked && outcome.input.url === "@u1.url", outcome.input.url);
+outcome = await session.call("fetch_content", { url: '<pi-ref type="tag" name="host" />' });
+assert('type="tag" is gone: it is refused and says what to write instead', !!outcome.blocked && /type="tag"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 // --- the model's own messages and what you type -----------------------------------------------------
 
@@ -285,6 +301,171 @@ const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: 'return ctx.date("da
 await fmtTag.userMessage("x");
 const fmtOutcome = await fmtTag.call("bash", { command: "echo <pi-fmt />" });
 assert("js tag: ctx.date(kind, offset, format) formats", !fmtOutcome.blocked && fmtOutcome.input.command === `echo ${tomorrow.getFullYear()}/${pad2(tomorrow.getMonth() + 1)}/${pad2(tomorrow.getDate())}`, fmtOutcome.input.command);
+
+// --- the tags that stop the agent guessing ------------------------------------------------------------
+
+mkdirSync(join(sandbox, "bench"), { recursive: true });
+mkdirSync(join(sandbox, ".pi", "tasks", "run1"), { recursive: true });
+writeFileSync(join(sandbox, "bench", "eval_suite.py"), "x");
+writeFileSync(join(sandbox, "bench", "rank_all.py"), "x");
+writeFileSync(join(sandbox, ".pi", "tasks", "run1", "b34b5bfff.json"), JSON.stringify({
+  id: "b34b5bfff", name: "publish 0.6.3 to npm", command: "npm publish", status: "completed",
+  startTime: Date.now() - 60_000, exitCode: 0, outputPath: ".pi/tasks/run1/b34b5bfff.output",
+}));
+writeFileSync(join(sandbox, ".pi", "tasks", "run1", "a11bbbb22.json"), JSON.stringify({
+  id: "a11bbbb22", name: "mini hard suites", command: "sh run_mini_queue2.sh", status: "running",
+  startTime: Date.now() - 5_000, exitCode: null, outputPath: ".pi/tasks/run1/a11bbbb22.output",
+}));
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" />' });
+assert('tool arg: <pi-file pattern="bench/*.py" /> returns a file that really exists',
+  !outcome.blocked && /^echo (eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" absolute="true" />' });
+assert('tool arg: absolute="true" gives the full path', !outcome.blocked && /^echo .+\/bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.{py,py}" all="true" />' });
+assert('tool arg: all="true" lists every match', !outcome.blocked && outcome.input.command.includes("eval_suite.py") && outcome.input.command.includes("rank_all.py"), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.nomatch" />' });
+assert("tool arg: a glob that matches nothing says what it looked at", !!outcome.blocked && /no file matches pattern="bench\/\*\.nomatch"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: "echo <pi-task status=\"running\" />" });
+assert('tool arg: <pi-task status="running" /> gives the live task id', !outcome.blocked && outcome.input.command === "echo a11bbbb22", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-task match="publish" part="status" />' });
+assert('tool arg: part="status" reads the task state', !outcome.blocked && outcome.input.command === "echo completed", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-task match="publish" part="output" />' });
+assert('tool arg: part="output" gives the task output file', !outcome.blocked && outcome.input.command === "echo .pi/tasks/run1/b34b5bfff.output", outcome.input.command);
+
+outcome = await session.call("bash", { command: "echo <pi-task index=\"9\" />" });
+assert("tool arg: a task index that is out of range is refused", !!outcome.blocked && /index="9" resolves to nothing/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-tool index="2" />' });
+assert('tool arg: <pi-tool index="2" /> names a tool the session actually has', !outcome.blocked && outcome.input.command === "echo read", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-tool part="description" match="shell" />' });
+assert('tool arg: part="description" gives the tool description', !outcome.blocked && outcome.input.command === "echo Run a shell command", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-tool scope="registered" match="sleep" />' });
+assert('tool arg: scope="registered" also sees tools not in the active set', !outcome.blocked && outcome.input.command === "echo sleep", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-tool match="never_used_tool_xyz" />' });
+assert("tool arg: an invented tool name is refused with the real list", !!outcome.blocked && /no tool matches match="never_used_tool_xyz" in the active tool set/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-tools match="web" />' });
+assert('tool arg: <pi-tools match="…" /> lists the matching tools', !outcome.blocked && /web_search/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: "echo <pi-session />" });
+assert('tool arg: <pi-session /> is this session id', !outcome.blocked && outcome.input.command === "echo 01a203bb-c952-707e", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-session part="model" />' });
+assert('tool arg: part="model" is the model id, not a guess', !outcome.blocked && outcome.input.command === "echo qwen3.8-flash-next", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-session part="cwd" />' });
+assert('tool arg: part="cwd" is the working directory the tools are using', !outcome.blocked && outcome.input.command === `echo ${sandbox}`, outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-session part="os" />' });
+assert('tool arg: part="os" names the platform', !outcome.blocked && /^echo [a-z]+-[a-z0-9_]+$/.test(outcome.input.command), outcome.input.command);
+
+const gitSession = makeSession("git.json", {}, undefined, process.cwd());
+outcome = await gitSession.call("bash", { command: "echo <pi-repo />" });
+assert('tool arg: <pi-repo /> is the repository root', !outcome.blocked && outcome.input.command === `echo ${process.cwd()}`, outcome.input.command);
+
+outcome = await gitSession.call("bash", { command: 'echo <pi-repo part="branch" />' });
+assert('tool arg: part="branch" is the branch name', !outcome.blocked && /^echo [A-Za-z0-9._/-]+$/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-repo part="head" />' });
+assert("tool arg: outside a repository it says so instead of guessing", !!outcome.blocked && /not a git repository/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+session.record({ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sh bench/eval_suite.py --model Mellum2.1-mlx-mxfp4" } }] });
+session.record({ role: "toolResult", toolCallId: "c1", toolName: "bash", isError: false, content: [{ type: "text", text: "prefill 969.2 tok/s\ndecode 87.8 tok/s\nwrote results/mellum.speed.json" }] });
+session.record({ role: "assistant", content: [{ type: "toolCall", id: "c2", name: "read", arguments: { path: "bench/rank_all.py" } }] });
+
+outcome = await session.call("bash", { command: 'echo <pi-history pattern="eval_suite" />' });
+assert('tool arg: <pi-history pattern="…" /> reuses an earlier command', !outcome.blocked && outcome.input.command === "echo sh bench/eval_suite.py --model Mellum2.1-mlx-mxfp4", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-history pattern="Mellum" part="tool" />' });
+assert('tool arg: part="tool" names the tool that call used', !outcome.blocked && outcome.input.command === "echo bash", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-history pattern="never_ran" />' });
+assert("tool arg: a history pattern with no match says how many calls it looked at", !!outcome.blocked && /looked at 2 calls in this session/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-result pattern="prefill" />' });
+assert('tool arg: <pi-result pattern="…" /> pulls the text out of an earlier tool result', !outcome.blocked && outcome.input.command.includes("969.2"), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-result pattern="decode" part="tool" />' });
+assert('tool arg: <pi-result part="tool" /> says which tool produced it', !outcome.blocked && outcome.input.command === "echo bash", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-result pattern="nothing_like_this" />' });
+assert("tool arg: a result pattern with no match says how many results it looked at", !!outcome.blocked && /looked at 1 result/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+process.env.PI_INLINE_TEST_VALUE = "https://hf-mirror.com";
+outcome = await session.call("bash", { command: 'echo <pi-env name="PI_INLINE_TEST_VALUE" />' });
+assert('tool arg: <pi-env name="…" /> is the real environment value', !outcome.blocked && outcome.input.command === "echo https://hf-mirror.com", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-env name="PI_INLINE_NOT_SET" />' });
+assert("tool arg: an unset variable is refused, not silently empty", !!outcome.blocked && /process.env.PI_INLINE_NOT_SET is not set/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-env name="PI_INLINE_NOT_SET" default="fallback" />' });
+assert('tool arg: default="…" covers the unset case', !outcome.blocked && outcome.input.command === "echo fallback", outcome.input.command);
+
+mkdirSync(join(sandbox, "skills", "selftest-skill-xyz"), { recursive: true });
+writeFileSync(join(sandbox, "skills", "selftest-skill-xyz", "SKILL.md"), "# selftest");
+const skillSession = makeSession("skill.json", { skillRoots: [join(sandbox, "skills")] });
+outcome = await skillSession.call("read", { path: '<pi-skill name="selftest-skill-xyz" />' });
+assert('tool arg: <pi-skill name="…" /> is the absolute SKILL.md path', !outcome.blocked && outcome.input.path === join(sandbox, "skills", "selftest-skill-xyz", "SKILL.md"), outcome.input.path);
+
+outcome = await skillSession.call("read", { path: '<pi-skill name="not_installed" />' });
+assert("tool arg: a skill that is not installed says where it looked", !!outcome.blocked && /no skill "not_installed" found/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+// --- pi-var: the agent names a thing once and reuses it ---------------------------------------------
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="mini" value="ssh macminister.local" />' });
+assert('tool arg: <pi-var name="mini" value="…" /> defines it', !outcome.blocked && outcome.input.command === "echo ssh macminister.local", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="mini" /> <pi-var name="mini" /> -v' });
+assert('tool arg: <pi-var name="mini" /> uses it as many times as you like', !outcome.blocked && outcome.input.command === "echo ssh macminister.local ssh macminister.local -v", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="mini" value="--thinking off" append="true" />' });
+assert('tool arg: append="true" adds a line to the variable', !outcome.blocked && outcome.input.command === "echo ssh macminister.local\n--thinking off", JSON.stringify(outcome.input.command));
+
+outcome = await session.call("bash", { command: "echo <pi-var name=\"never_set\" />" });
+assert("tool arg: using an undefined variable lists the ones that exist", !!outcome.blocked && /no variable "never_set" is defined - defined: mini/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: "echo <pi-vars />" });
+assert("tool arg: <pi-vars /> lists what the agent has named", !outcome.blocked && /mini = ssh macminister/.test(outcome.input.command), outcome.input.command);
+
+await session.userMessage("see https://example.com/shot.png");
+outcome = await session.call("bash", { command: `echo <pi-var name="shot" value="<pi-ref type='url' offset='-1' />" />` });
+assert('tool arg: a variable value may itself be a tag', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="shot" />' });
+assert('tool arg: reading it back resolves the tag inside it again', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="shot" unset="true" />done' });
+assert('tool arg: unset="true" removes it', !outcome.blocked && outcome.input.command === "echo done", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var name="kept" value="persisted value" persist="true" />' });
+assert('tool arg: persist="true" writes the variable to the project', !outcome.blocked && outcome.input.command === "echo persisted value", outcome.input.command);
+assert('tool arg: the persisted variable is on disk under .pi/', existsSync(join(sandbox, ".pi", "pi-inline-vars.json")) && readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").includes("kept"), readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").slice(0, 120));
+
+const seeded = makeSession("seeded.json", { vars: { box: "macminister.local" } });
+outcome = await seeded.call("bash", { command: 'echo <pi-var name="box" />' });
+assert('tool arg: vars in the config are available as <pi-var name="…" />', !outcome.blocked && outcome.input.command === "echo macminister.local", outcome.input.command);
+
+// --- descriptions: the model is told what your tags mean ---------------------------------------------
+
+const described = makeSession("described.json", {
+  tags: { host: { value: "ssh macminister.local", description: "the mac mini every bench command runs on" } },
+});
+const guidance = await described.userMessage("run the suite");
+assert("guidance: a user tag ships with its description so the model knows what it is for",
+  guidance.some((line) => line.includes("<pi-host") && line.includes("the mac mini every bench command runs on")), guidance.join("\n").slice(0, 400));
+assert("guidance: every built-in tag is listed with how to write it",
+  ["<pi-ref type=", "<pi-date value=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
+    .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
 
 console.log(`\n${failures === 0 ? "SELFTEST PASSED" : "SELFTEST FAILED"} (${failures} failing)`);
 process.exit(failures === 0 ? 0 : 1);
