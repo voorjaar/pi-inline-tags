@@ -486,5 +486,11 @@ assert("guidance: every built-in tag is listed with how to write it",
   ["<pi-ref type=", "<pi-date value=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
     .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
 
+// A model that quotes its command writes the tag with shell escapes, which is how it really arrives.
+outcome = await session.call("bash", { command: 'echo "the date is <pi-date value=\\"date\\" /> and the link <pi-ref type=\\"url\\" offset=\\"-1\\" />"' });
+assert("tool arg: a tag inside a shell-quoted command (escaped quotes) still resolves",
+  !outcome.blocked && /the date is \d{4}-\d{2}-\d{2} and the link https:\/\/\S+/.test(outcome.input.command),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
 console.log(`\n${failures === 0 ? "SELFTEST PASSED" : "SELFTEST FAILED"} (${failures} failing)`);
 process.exit(failures === 0 ? 0 : 1);

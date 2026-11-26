@@ -317,7 +317,10 @@ function expandHome(path: string): string {
 }
 
 const USER_REF = /^u(-?\d+)(?:\.(url(\d*)|path|line(\d+)|text))?$/;
-const ELEMENT_ATTR = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+// Two spellings reach us and they look alike: a model that quotes its command sends `type=\"url\"` (the
+// backslashes belong to the shell, the value has no quotes in it), while a tag carrying a regex or template
+// sends `pattern="issue (\\d+)"` or `title="say \\"hi\\""` (a bare quote, escapes inside the value).
+// One regex cannot tell them apart, so attribute values are read character by character.
 const URL_PATTERN = /https?:\/\/[^\s"'`<>()\[\]]+/g;
 const PATH_PATTERN = /(?:~|\/)[A-Za-z0-9_./-]{3,}/g;
 
@@ -687,7 +690,44 @@ function dateValue(kind: string, modifier?: string, format?: string): string | u
 
 function parseAttrs(raw: string): Record<string, string> {
   const attrs: Record<string, string> = {};
-  for (const match of raw.matchAll(ELEMENT_ATTR)) attrs[(match[1] ?? "").toLowerCase()] = match[2] ?? match[3] ?? "";
+  const head = /(\w+)\s*=\s*/g;
+  let match: RegExpExecArray | null;
+  while ((match = head.exec(raw)) !== null) {
+    let i = match.index + match[0].length;
+    const shellEscaped = raw[i] === "\\" && raw[i + 1] === '"';
+    let closing: string;
+    if (shellEscaped) {
+      closing = '"';
+      i += 2;
+    } else if (raw[i] === '"' || raw[i] === "'") {
+      closing = raw[i]!;
+      i += 1;
+    } else {
+      continue; // an unquoted attribute is not this syntax
+    }
+    let value = "";
+    while (i < raw.length) {
+      const ch = raw[i]!;
+      if (ch === "\\") {
+        const next = raw[i + 1];
+        // In a shell-quoted tag the backslash before a quote is the delimiter, not content.
+        if (shellEscaped && next === '"') break;
+        if (next === '"' || next === "'") {
+          value += next;
+          i += 2;
+          continue;
+        }
+        value += ch; // `\d`, `\n`, a lone backslash: kept exactly as written
+        i += 1;
+        continue;
+      }
+      if (ch === closing) break;
+      value += ch;
+      i += 1;
+    }
+    attrs[(match[1] ?? "").toLowerCase()] = value;
+    head.lastIndex = shellEscaped ? i + 2 : i + 1; // never re-read the value as further attributes
+  }
   return attrs;
 }
 

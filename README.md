@@ -65,6 +65,9 @@ useful if a wrong one is visible. The `pi-` prefix exists so a tag is never conf
 an HTML element — `<div>`, `<span>`, `@scope/package` and email addresses are never touched. The bare spelling
 (`<ref type="url" />`) resolves too; an undeclared name (`<whatever />`) is left alone rather than guessed at.
 
+A tag also works inside a quoted command — `echo "date <pi-date value=\"date\" />"` — because the shell's
+escaped quotes are recognised as the attribute's delimiters, not as its value.
+
 Expansion happens in three places, so the real text — not the model's recollection of it — is what lands:
 
 | where | what happens |
@@ -239,7 +242,7 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-92 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+93 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
 `format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`,
 `var`/`vars` including a value that contains a tag, an id captured from another tag, and `persist` writing to
 `.pi/`), every user tag shape (`value`, `template`, `hook`, `js` script file, `pattern`), a missing script file

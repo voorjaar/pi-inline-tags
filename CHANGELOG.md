@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- **A tag inside a shell-quoted command now resolves.** Found by running a real session: the model wrote
+  `echo "… <pi-ref type=\"url\" offset=\"-1\" />"` and the attributes parsed as empty, so the call was refused
+  with `needs type=…`. Two spellings collide - `type=\"url\"` (the backslashes belong to the shell) and
+  `pattern="issue (\d+)"` / `title="say \"hi\""` (a bare quote, escapes inside the value) - and no single regex
+  tells them apart. Attribute values are read character by character now: a backslash before a quote closes a
+  shell-quoted attribute, and elsewhere it escapes the quote into the value.
+
 ## 0.3.0
 
 - **A tag's code is a file, not a string in JSON.** `~/.pi/agent/tags/<name>.js` with one default export;
