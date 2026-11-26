@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- **`<pi-debug id="…" />` now reports where the value came from**, the way a JavaScript console reports a
+  variable: `target = "bench/rank_all.py"  (17 chars, from <pi-file pattern="bench/*.py" id="target">, stored
+  13:35:55)`. The store keeps the whole spelling that produced the value, not just the tag name, plus a flag for
+  ids the agent never named (shown as `(auto id)`).
+- **The value cut is 50 characters, not 150** — the line now carries length, provenance and a timestamp, and the
+  whole line has to survive being pasted into a shell command. `max="…"` widens it, `full="true"` removes the
+  cut, `quiet="true"` prints only the value.
+- Values are quoted and escaped (`\n` shown as an escape) instead of flattened with `⏎`.
+- **Fix:** `part="source"` returned the value, not the provenance, because the provenance text itself starts with
+  `<` and was being re-expanded as another reference. Provenance is now marked literal and never expanded.
+
 ## 0.4.0
 
 - **`<pi-debug id="…" />`** prints what a variable actually holds, cut at 150 characters with `...`. The output

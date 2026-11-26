@@ -448,7 +448,7 @@ outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.
 assert('tool arg: any tag with id="…" stores its result for reuse', !outcome.blocked && /^echo bench\/(eval_suite|rank_all)\.py and bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-var id="target" part="source" />' });
-assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && outcome.input.command === "echo <pi-file>", outcome.input.command);
+assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && /^echo <pi-file pattern="bench\/\*\.py" id="target">$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-task status="running" /> <pi-vars />' });
 assert("tool arg: a tag with no id still gets one and shows up in <pi-vars />", !outcome.blocked && /from <pi-task>/.test(outcome.input.command), outcome.input.command.slice(0, 200));
@@ -492,34 +492,41 @@ const longValue = "x".repeat(200);
 await session.call("bash", { command: `echo <pi-var id="long" value="${longValue}" />` });
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="long" />' });
-assert('tool arg: <pi-debug id="…" /> prints the value cut at 150 characters with "..."',
-  !outcome.blocked && outcome.input.command === `echo ${"x".repeat(150)}...`, outcome.input.command.slice(0, 80));
+assert('tool arg: <pi-debug id="…" /> prints the value cut at 50 characters with "..."',
+  !outcome.blocked && /^echo long = "x{50}\.\.\.  \(200 chars, from <pi-var id="long" value="…">, stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
 
 await session.call("bash", { command: 'echo <pi-var id="short" value="mini.local" />' });
 outcome = await session.call("bash", { command: 'echo <pi-debug id="short" />' });
 assert("tool arg: a short value is printed whole, with no ellipsis",
-  !outcome.blocked && outcome.input.command === "echo mini.local", outcome.input.command);
+  !outcome.blocked && /^echo short = "mini\.local"  \(10 chars, from <pi-var id="short" value="…">, stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="short" quiet="true" />' });
+assert('tool arg: quiet="true" gives just the value, for pasting into a command',
+  !outcome.blocked && outcome.input.command === "echo \"mini.local\"", outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="long" max="20" />' });
-assert('tool arg: max="20" narrows the cut', !outcome.blocked && outcome.input.command === `echo ${"x".repeat(20)}...`, outcome.input.command);
+assert('tool arg: max="20" narrows the cut',
+  !outcome.blocked && /^echo long = "x{20}\.\.\.  \(200 chars/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="long" full="true" />' });
-assert('tool arg: full="true" prints all of it', !outcome.blocked && outcome.input.command === `echo ${longValue}`, outcome.input.command.slice(0, 60));
+assert('tool arg: full="true" prints all of it',
+  !outcome.blocked && outcome.input.command.includes(`"${longValue}"`), outcome.input.command.slice(0, 60));
 
 await session.call("bash", { command: 'echo <pi-var id="two" value="line one" />' });
 await session.call("bash", { command: 'echo <pi-var id="two" value="line two" append="true" />' });
 outcome = await session.call("bash", { command: 'echo <pi-debug id="two" />' });
-assert("tool arg: a multi-line value stays on one line, newlines shown as ⏎",
-  !outcome.blocked && /line one ⏎ line two/.test(outcome.input.command), outcome.input.command);
+assert("tool arg: a multi-line value stays on one line, the newline shown as an escape",
+  !outcome.blocked && /echo two = "line one\\nline two"  \(17 chars/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" id="target" /> <pi-debug id="target" />' });
-assert("tool arg: <pi-debug /> reads back anything another tag stored under an id",
-  !outcome.blocked && /bench\/(eval_suite|rank_all)\.py bench\/(eval_suite|rank_all)\.py/.test(outcome.input.command), outcome.input.command);
+console.log("DEBUG blocked?", JSON.stringify(outcome.blocked), "CMD:", JSON.stringify(outcome.input.command));
+assert("tool arg: <pi-debug /> names the tag and attributes that produced the value",
+  !outcome.blocked && /target = "bench\/(eval_suite|rank_all)\.py"  \(17 chars, from <pi-file pattern="bench\/\*\.py" id="target">, stored/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug />' });
-assert("tool arg: <pi-debug /> with no id dumps the variables with their source and length",
-  !outcome.blocked && /long = x{150}\.\.\.  \(from pi-var, 200 chars\)/.test(outcome.input.command) && /target = /.test(outcome.input.command),
-  outcome.input.command.slice(0, 200));
+assert("tool arg: <pi-debug /> with no id dumps every variable with its provenance",
+  !outcome.blocked && /long = "x{50}\.\.\.  \(200 chars, from <pi-var/.test(outcome.input.command) && /target = /.test(outcome.input.command),
+  outcome.input.command.slice(0, 240));
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="nope" />' });
 assert("tool arg: debugging an unknown id lists the ids that do exist",

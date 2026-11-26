@@ -26,8 +26,10 @@
  *   <pi-skill name="lilypond-music" />          the absolute path of an installed skill
  *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
  *   <pi-vars />                                 list every captured value and which tag produced it
- *   <pi-debug id="mini" />                      print what a variable holds, cut at 150 chars with "..."
- *                                             (max="600" widens, full="true" prints all, no id dumps them all)
+ *   <pi-debug id="mini" />                      inspect a variable like a console would: the value cut at 50
+ *                                             chars, then its length, the tag that produced it, and when it was
+ *                                             stored (max="600" widens, full="true" prints all, quiet="true"
+ *                                             prints only the value, no id dumps every variable)
  *   <pi-pr n="12" />                            a tag you defined in JSON
  *
  * Every tag also stores what it resolved to: give it `id="target"` and `<pi-var id="target" />` cites it
@@ -106,8 +108,9 @@ const MAX_TASK_RECORDS = 300;
 const MAX_HISTORY_SCAN = 600;
 const MAX_SKILL_DEPTH = 4;
 const MAX_VARS = 60;
-const DEBUG_TRUNCATE_CHARS = 150;
+const DEBUG_TRUNCATE_CHARS = 50;
 const MAX_AUTO_VARS = 24;
+const DEBUG_SOURCE_CHARS = 120;
 const VAR_FILE_NAME = "pi-inline-vars.json";
 const MAX_LIST_ITEMS = 20;
 
@@ -1044,7 +1047,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (request.kind === "var") {
       const stored = resolveVarTag(attrs, cwd);
       if (stored.value === undefined) return stored;
-      if (depth < MAX_REF_DEPTH && stored.value.includes("<")) return { value: (await expandText(stored.value, depth + 1, ctx)).text };
+      if (!stored.literal && depth < MAX_REF_DEPTH && stored.value.includes("<")) return { value: (await expandText(stored.value, depth + 1, ctx)).text };
       return stored;
     }
     if (request.kind === "vars") return resolveVarsTag();
@@ -1370,9 +1373,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   // --- variables the agent sets for itself ---------------------------------------------------------
-  type StoredVar = { value: string; source: string; at: number };
+  type StoredVar = { value: string; source: string; tag: string; at: number; auto: boolean };
   const varStore = new Map<string, StoredVar>(
-    Object.entries(config.vars).map(([key, value]) => [key, { value, source: "config", at: Date.now() }]),
+    Object.entries(config.vars).map(([key, value]) => [key, { value, source: "written in pi-inline-tags.json", tag: "config", at: 0, auto: false }]),
   );
   const usedIds = new Set<string>();
 
@@ -1392,7 +1395,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   /** Named variables win over anonymous captures: the oldest capture is dropped before a name is refused. */
   const autoEntries = (): Array<{ id: string; at: number }> =>
     [...varStore.entries()]
-      .filter(([, entry]) => entry.source.startsWith("<"))
+      .filter(([, entry]) => entry.auto)
       .map(([id, entry]) => ({ id, at: entry.at }))
       .sort((a, b) => a.at - b.at);
 
@@ -1407,7 +1410,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   /** Every tag that resolves is remembered, so its result can be cited again by id. */
-  const captureVar = (value: string, attrs: Record<string, string>, source: string): string => {
+  const captureVar = (value: string, attrs: Record<string, string>, spelling: string, tag: string): string => {
     const requested = attrs.id;
     const explicit = requested && /^[A-Za-z0-9_.-]{1,40}$/.test(requested) ? requested : undefined;
     let id = explicit;
@@ -1416,7 +1419,13 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (autos.length >= MAX_AUTO_VARS) varStore.delete(autos[0]!.id);
       id = newVarId();
     } else if (!varStore.has(id) && !makeRoom(true)) return "";
-    varStore.set(id, { value: value.slice(0, MAX_REF_VALUE_CHARS), source, at: Date.now() });
+    varStore.set(id, {
+      value: value.slice(0, MAX_REF_VALUE_CHARS),
+      source: spelling.slice(0, DEBUG_SOURCE_CHARS),
+      tag,
+      at: Date.now(),
+      auto: !explicit,
+    });
     usedIds.add(id);
     return id;
   };
@@ -1432,10 +1441,18 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       for (const [key, value] of Object.entries(raw)) {
         if (varStore.has(key)) continue;
-        if (typeof value === "string") varStore.set(key, { value, source: "project", at: 0 });
+        if (typeof value === "string") varStore.set(key, { value, source: "project file", tag: "project", at: 0, auto: false });
         else if (value && typeof value === "object") {
           const entry = value as { value?: unknown; source?: unknown };
-          if (typeof entry.value === "string") varStore.set(key, { value: entry.value, source: typeof entry.source === "string" ? entry.source : "project", at: 0 });
+          if (typeof entry.value === "string") {
+            varStore.set(key, {
+              value: entry.value,
+              source: typeof entry.source === "string" ? entry.source : "project file",
+              tag: typeof entry.tag === "string" ? entry.tag : "project",
+              at: 0,
+              auto: false,
+            });
+          }
         }
       }
     } catch {
@@ -1451,7 +1468,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
         for (const [key, value] of Object.entries(raw)) if (typeof value === "string") stored[key] = value;
       }
-      for (const [key, entry] of varStore) stored[key] = { value: entry.value, source: entry.source };
+      for (const [key, entry] of varStore) stored[key] = { value: entry.value, source: entry.source, tag: entry.tag };
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify(stored, null, 2) + "\n", "utf8");
       projectVarFiles.add(path);
@@ -1462,10 +1479,24 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const varNames = (): string[] => [...varStore.keys()].reverse();
 
-  /** Debug output has to survive being pasted into a shell command: one line, bounded, newlines shown. */
-  const truncateForDebug = (value: string, max: number): string => {
-    const flat = value.replace(/\r/g, "").replace(/\n/g, " ⏎ ");
-    return flat.length <= max ? flat : `${flat.slice(0, max)}...`;
+  /** Debug output has to survive being pasted into a shell command: one line, bounded, escapes shown. */
+  const debugValue = (value: string, max: number): string => {
+    const shown = JSON.stringify(value); // quotes and \n the way a console prints a string
+    return shown.length <= max + 2 ? shown : `${shown.slice(0, max + 1)}...`;
+  };
+
+  const storedAtLabel = (at: number): string => {
+    if (!at) return "from a previous session";
+    const date = new Date(at);
+    const time = date.toTimeString().slice(0, 8);
+    return new Date().toDateString() === date.toDateString() ? time : `${date.toISOString().slice(0, 10)} ${time}`;
+  };
+
+  const describeVar = (id: string, entry: StoredVar, max: number, quiet: boolean): string => {
+    const value = debugValue(entry.value, max);
+    if (quiet) return value;
+    const origin = entry.auto ? `${entry.source} (auto id)` : entry.source;
+    return `${id} = ${value}  (${entry.value.length} chars, from ${origin}, stored ${storedAtLabel(entry.at)})`;
   };
 
   const resolveDebugTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
@@ -1477,18 +1508,12 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       max = Math.min(Math.floor(parsed), MAX_REF_VALUE_CHARS);
     }
     const show = attrs.full === "true" ? MAX_REF_VALUE_CHARS : max;
+    const quiet = attrs.quiet === "true";
     const id = attrs.id;
     if (id === undefined) {
       const ids = varNames();
       if (ids.length === 0) return { missing: 'no variables yet - give any tag id="…" or write <pi-var id="mini" value="…" />' };
-      return {
-        value: ids
-          .map((key) => {
-            const entry = varStore.get(key)!;
-            return `${key} = ${truncateForDebug(entry.value, show)}  (from ${entry.source}, ${entry.value.length} chars)`;
-          })
-          .join("\n"),
-      };
+      return { value: ids.map((key) => describeVar(key, varStore.get(key)!, max, quiet)).join("\n") };
     }
     if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
     const stored = varStore.get(id);
@@ -1496,10 +1521,10 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const known = varNames();
       return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " yet"}` };
     }
-    return { value: truncateForDebug(stored.value, show) };
+    return { value: describeVar(id, stored, show, quiet) };
   };
 
-  const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
+  const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string; literal?: boolean } => {
     const id = attrs.id ?? attrs.var ?? attrs.name;
     if (!id) return { missing: '<pi-var /> needs id="mini" (and value="…" to define it)' };
     if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
@@ -1513,7 +1538,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const previous = varStore.get(id);
       varStore.set(id, {
         value: (attrs.append === "true" && previous ? `${previous.value}\n${attrs.value}` : attrs.value).slice(0, MAX_REF_VALUE_CHARS),
-        source: previous?.source ?? "pi-var",
+        source: previous?.source ?? `<pi-var id="${id}" value="…">`,
+        tag: previous?.tag ?? "pi-var",
+        auto: previous?.auto ?? false,
         at: Date.now(),
       });
       if (attrs.persist === "true") saveProjectVars(cwd);
@@ -1526,7 +1553,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : ' yet (write <pi-var id="mini" value="…" /> or give any tag an id="…")'}` };
     }
     if (attrs.part === "length") return { value: String(stored.value.length) };
-    if (attrs.part === "source") return { value: stored.source };
+    // The provenance is text about the value, not another reference to expand.
+    if (attrs.part === "source") return { value: stored.source, literal: true };
     return { value: stored.value };
   };
 
@@ -1538,7 +1566,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       value: ids
         .map((id) => {
           const entry = varStore.get(id)!;
-          return `${id} = ${entry.value.slice(0, 120).replace(/\n/g, " ⏎ ")}  (from ${entry.source})`;
+          return `${id} = ${entry.value.slice(0, 120).replace(/\n/g, " ⏎ ")}  (from <${entry.tag}>)`;
         })
         .join("\n"),
     };
@@ -1670,7 +1698,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         used.push(original);
         // Whatever a tag resolved to is remembered, so `id="…"` or <pi-vars /> can cite it again.
         const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
-        if (bare !== "var" && bare !== "vars" && bare !== "debug") captureVar(resolved.value, candidate.attrs, `<${candidate.tag}>`);
+        // The spelling that produced the value is its provenance: <pi-file pattern="bench/*.py">, not just "file".
+        if (bare !== "var" && bare !== "vars" && bare !== "debug") {
+          const spelling = (candidate.token ?? original).replace(/\s+/g, " ").replace(/\s*\/>$/, ">");
+          captureVar(resolved.value, candidate.attrs, spelling, candidate.tag ?? bare);
+        }
       } else {
         out += original;
         if (resolved.missing) missing.push(resolved.missing);
