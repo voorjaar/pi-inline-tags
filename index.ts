@@ -57,6 +57,7 @@
  *     "expandToolCalls": true,
  *     "expandAssistant": true,
  *     "expandUserInput": true,
+ *     "codeSpansAreLiteral": true,              // inside `code spans` and fences a tag-looking span is text
  *     "promptHook": "morning_note",           // name of a tag whose text is appended to the system prompt
  *     "scriptTimeoutMs": 2000,
  *     "scriptCacheSeconds": 5,
@@ -339,6 +340,37 @@ const RETIRED_TAGS: Record<string, string> = {
   join: '<pi-join /> is gone - a variable body composes tags: <pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>',
 };
 
+/**
+ * Markdown code spans and fenced blocks hold literal text. Every tag also has a bare spelling (file is the
+ * same tag as pi-file), so a changelog line that showed a tag-looking span inside backticks was resolved
+ * anyway - and refused the whole tool call when that span lacked the attribute the tag needs.
+ */
+function literalSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const match of text.matchAll(/`{3,}[^\n]*\n[\s\S]*?\n`{3,}/g)) {
+    const start = match.index ?? 0;
+    spans.push([start, start + match[0].length]);
+  }
+  const insideFence = (at: number) => spans.some(([from, to]) => at >= from && at < to);
+  let at = 0;
+  while (at < text.length) {
+    if (text[at] !== "`" || insideFence(at)) {
+      at += 1;
+      continue;
+    }
+    let run = 0;
+    while (text[at + run] === "`") run += 1;
+    const closer = text.indexOf("`".repeat(run), at + run);
+    if (closer === -1) {
+      at += run;
+      continue;
+    }
+    spans.push([at, closer + run]);
+    at = closer + run;
+  }
+  return spans.sort((a, b) => a[0] - b[0]);
+}
+
 type TagSpec = {
   name: string;
   kind: "builtin" | "value" | "template" | "script";
@@ -382,6 +414,8 @@ type Config = {
   expandToolCalls: boolean;
   expandAssistant: boolean;
   expandUserInput: boolean;
+  /** Inside `code spans` and ``` fences a tag-looking span is literal text, not a tag. */
+  codeSpansAreLiteral: boolean;
   /** Name of a tag whose text is appended to the system prompt. */
   promptHook: string;
   scriptTimeoutMs: number;
@@ -399,6 +433,7 @@ const DEFAULT_CONFIG: Config = {
   expandToolCalls: true,
   expandAssistant: true,
   expandUserInput: true,
+  codeSpansAreLiteral: true,
   promptHook: "",
   scriptTimeoutMs: DEFAULT_HOOK_TIMEOUT_MS,
   scriptCacheSeconds: DEFAULT_HOOK_CACHE_SECONDS,
@@ -526,7 +561,7 @@ function readConfig(): { path: string; config: Config; problems: string[] } {
     if (Number.isInteger(value) && value >= 0 && value <= 20) config.refIndexSize = value;
     else problems.push("refIndexSize must be an integer between 0 and 20");
   }
-  for (const key of ["expandToolCalls", "expandAssistant", "expandUserInput"] as const) {
+  for (const key of ["expandToolCalls", "expandAssistant", "expandUserInput", "codeSpansAreLiteral"] as const) {
     if (raw[key] !== undefined) {
       if (typeof raw[key] === "boolean") config[key] = raw[key];
       else problems.push(`${key} must be a boolean`);
@@ -1534,10 +1569,13 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   /** A variable holds text, never another reference: that is what keeps `<pi-var id="x" />` predictable. */
   const findTagIn = (text: string): string | undefined => {
     if (!elementScanner || !text.includes("<")) return undefined;
-    elementScanner.lastIndex = 0;
-    const hit = elementScanner.exec(text);
-    elementScanner.lastIndex = 0;
-    return hit ? hit[0] : undefined;
+    const literal = config.codeSpansAreLiteral ? literalSpans(text) : [];
+    for (const hit of text.matchAll(elementScanner)) {
+      const at = hit.index ?? 0;
+      if (literal.some(([from, to]) => at >= from && at < to)) continue;
+      return hit[0];
+    }
+    return undefined;
   };
 
   const resolveVarTag = (attrs: Record<string, string>, cwd: string, body?: Body): { value?: string; missing?: string } => {
@@ -1714,11 +1752,16 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const candidates: Candidate[] = [];
     const containers: Array<[number, number]> = [];
 
+    // Inside a code span or a fence the text is documentation about a tag, not a tag the agent wrote.
+    const literal = config.codeSpansAreLiteral ? literalSpans(text) : [];
+    const inLiteral = (position: number) => literal.some(([from, to]) => position >= from && position < to);
+
     // A body is resolved as a unit: its tags resolve first, then the whole span is replaced once.
     if (containerScanner && depth === 0 && text.includes("<")) {
       containerScanner.lastIndex = 0;
       for (const match of text.matchAll(containerScanner)) {
         const start = match.index ?? 0;
+        if (inLiteral(start)) continue;
         const written = match[1] ?? "";
         candidates.push({ start, end: start + match[0].length, tag: written, spelling: match[0], attrs: parseAttrs(match[2] ?? ""), body: match[3] ?? "" });
         containers.push([start, start + match[0].length]);
@@ -1730,7 +1773,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       elementScanner.lastIndex = 0;
       for (const match of text.matchAll(elementScanner)) {
         const start = match.index ?? 0;
-        if (insideContainer(start)) continue; // already covered by a body
+        if (inLiteral(start) || insideContainer(start)) continue; // already covered by a body, or literal text
         const attrs = parseAttrs(match[2] ?? "");
         const written = match[1] ?? "";
         // `<pi-var id="x">` with no closing tag reads the variable and leaves the text behind; that is a
@@ -1758,6 +1801,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       entry.regex.lastIndex = 0;
       for (const match of text.matchAll(entry.regex)) {
         const start = match.index ?? 0;
+        if (inLiteral(start)) continue;
         const attrs: Record<string, string> = { ...(match.groups ?? {}) };
         match.slice(1).forEach((value, position) => {
           if (typeof value === "string") attrs[String(position + 1)] = value;
@@ -1770,7 +1814,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       closerScanner.lastIndex = 0;
       for (const match of text.matchAll(closerScanner)) {
         const at = match.index ?? 0;
-        if (insideContainer(at)) continue;
+        if (inLiteral(at) || insideContainer(at)) continue;
         missing.push(`${match[0]} closes nothing - a body is only allowed on <pi-var id="…">…</pi-var> and your own tags with "children": true`);
         break;
       }

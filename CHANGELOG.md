@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.1
+
+**Code spans hold literal text.** Every tag has a bare spelling (`file` resolves the same as `pi-file`), so prose
+about tags was being resolved as one. A changelog line that quoted `source &lt;file&gt;` inside backticks made
+`pi-file` ask for its `pattern`, find nothing, and refuse the whole edit call: the file stayed unwritten, and the
+refusal pointed at an example the writer had quoted on purpose.
+
+- A `literalSpans()` pass marks fenced blocks and inline code spans. A candidate that starts inside one is skipped -
+  not resolved, not refused, left exactly as written. It covers element tags, container bodies, pattern tags, and the
+  stray-closer complaint.
+- `findTagIn`, which decides whether a variable's body holds a reference, is literal-aware for the same reason.
+- **`"codeSpansAreLiteral": false`** restores the old behaviour for anyone who writes a tag inside backticks and
+  means it to resolve.
+- Outside backticks nothing changed: a tag missing an attribute is still refused with the correction, because a
+  half-accepted tag is the failure this extension exists to prevent.
+
 ## 0.9.0
 
 One way to write tag code: the `js` file. The hooks file and the `"js": true` shorthand are gone.

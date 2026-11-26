@@ -666,5 +666,38 @@ assert("tool arg: a tag inside a shell-quoted command (escaped quotes) still res
   !outcome.blocked && /the date is \d{4}-\d{2}-\d{2} and the link https:\/\/\S+/.test(outcome.input.command),
   outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
+// --- code spans hold literal text ---------------------------------------------------------------
+
+// Built from pieces so this file's own text is not rewritten by the extension it is testing.
+const tag = (body) => "<" + body + " />";
+const code = (body) => "`" + body + "`";
+const fence = "```";
+
+outcome = await session.call("bash", { command: `echo ${code(tag("file"))} is how the docs spell it` });
+assert("code span: a tag-looking span in backticks stays as written",
+  !outcome.blocked && outcome.input.command.includes(code(tag("file"))),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: `echo ${code(tag('pi-file pattern="bench/*.py"'))}` });
+assert("code span: a tag with its attributes inside backticks is not resolved",
+  !outcome.blocked && outcome.input.command.includes('pi-file pattern="bench/*.py"'),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: `printf '%s\n' ${fence}\nsee ${tag('pi-file pattern="bench/*.py"')}\n${fence}` });
+assert("code span: a fenced block is literal too",
+  !outcome.blocked && outcome.input.command.includes(tag('pi-file pattern="bench/*.py"')),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: `echo ${tag("pi-file")}` });
+assert("code span: outside backticks a tag still gets its correction",
+  !!outcome.blocked && /needs pattern/.test(outcome.blocked.reason),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+const literalOff = makeSession("literal-off.json", { codeSpansAreLiteral: false });
+outcome = await literalOff.call("bash", { command: `echo ${code(tag('pi-date value="date"'))}` });
+assert("config: codeSpansAreLiteral false puts tags back inside backticks",
+  !outcome.blocked && /\d{4}-\d{2}-\d{2}/.test(outcome.input.command),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
 console.log(`\n${failures === 0 ? "SELFTEST PASSED" : "SELFTEST FAILED"} (${failures} failing)`);
 process.exit(failures === 0 ? 0 : 1);

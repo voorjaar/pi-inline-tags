@@ -1,6 +1,6 @@
 {
   "name": "pi-inline-tags",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Inline reference tags for pi: the agent writes <pi-ref />, <pi-date />, <pi-file /> … in a tool call and the extension replaces them with real session values before the tool runs. Your own tags are fixed text, a template, your own regex, or a script file; a tag it cannot resolve refuses the call.",
   "type": "module",
   "main": "index.ts",

@@ -217,6 +217,12 @@ useful if a wrong one is visible. The `pi-` prefix exists so a tag is never conf
 resolves too; an undeclared name is left alone. Old spellings get a correction rather than silence:
 `<pi-vars />` → *"is gone — `<pi-debug />` lists every variable"*, `match="…"` → *"write `pattern="…"`"*.
 
+**Inside a code span or a fence, a tag-looking span is literal** (since 0.9.1). Documentation about a tag is not a
+use of one: writing the bare spelling of `pi-file` inside backticks used to ask that tag for its `pattern`, find
+nothing, and refuse the whole call - scanned, unresolved, and reported as an error. Now it is scanned, skipped, and
+left exactly as written. Set `"codeSpansAreLiteral": false` if you write tags inside backticks and mean them to
+resolve.
+
 ---
 
 ## Install
@@ -239,6 +245,7 @@ Config is optional — defaults apply to every model. `~/.pi/agent/pi-inline-tag
   "vars": { "staging": "staging.example.com" },
   "skillRoots": [],
   "promptHook": "prod",
+  "codeSpansAreLiteral": true,
   "scriptTimeoutMs": 2000
 }
 ```
