@@ -26,6 +26,8 @@
  *   <pi-skill name="lilypond-music" />          the absolute path of an installed skill
  *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
  *   <pi-vars />                                 list every captured value and which tag produced it
+ *   <pi-debug id="mini" />                      print what a variable holds, cut at 150 chars with "..."
+ *                                             (max="600" widens, full="true" prints all, no id dumps them all)
  *   <pi-pr n="12" />                            a tag you defined in JSON
  *
  * Every tag also stores what it resolved to: give it `id="target"` and `<pi-var id="target" />` cites it
@@ -104,6 +106,7 @@ const MAX_TASK_RECORDS = 300;
 const MAX_HISTORY_SCAN = 600;
 const MAX_SKILL_DEPTH = 4;
 const MAX_VARS = 60;
+const DEBUG_TRUNCATE_CHARS = 150;
 const MAX_AUTO_VARS = 24;
 const VAR_FILE_NAME = "pi-inline-vars.json";
 const MAX_LIST_ITEMS = 20;
@@ -186,7 +189,8 @@ const BUILTIN_GUIDE: Record<string, string> = {
   result: '<pi-result pattern="prefill" part="text|tool" context="240" full="true" error="true" all="true" /> - what an earlier tool call returned',
   env: '<pi-env name="HF_ENDPOINT" default="" /> - the value of an environment variable',
   skill: '<pi-skill name="lilypond-music" file="scripts/x.py" /> - the absolute path of an installed skill',
-  var: '<pi-var name="mini" value="ssh macminister.local" /> defines it, <pi-var name="mini" /> uses it, <pi-var name="mini" append="true" /> adds a line, <pi-vars /> lists them',
+  var: '<pi-var id="mini" value="ssh macminister.local" /> defines it, <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line, <pi-vars /> lists them',
+  debug: '<pi-debug id="mini" /> prints what that variable holds, cut at 150 characters with "..." (max="600" widens it, full="true" prints all of it, no id dumps every variable)',
 };
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".svn", ".hg", "dist", "build", "__pycache__", ".next", ".venv"]);
@@ -326,7 +330,7 @@ const PATH_PATTERN = /(?:~|\/)[A-Za-z0-9_./-]{3,}/g;
 
 /** The shipped defaults. `tags` in the config adds to them, `disableTags` removes from them. */
 const TAG_PREFIX = "pi-";
-const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "vars"];
+const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "vars", "debug"];
 
 type TagSpec = {
   name: string;
@@ -1044,6 +1048,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       return stored;
     }
     if (request.kind === "vars") return resolveVarsTag();
+    if (request.kind === "debug") return resolveDebugTag(attrs, cwd);
     const offset = attrs.offset ?? attrs.message ?? "-1";
     if (!/^-?\d+$/.test(offset)) return { missing: `offset="${offset}" must be a message offset (offset="-1" is the most recent)` };
     const requested = Number(offset);
@@ -1457,6 +1462,43 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const varNames = (): string[] => [...varStore.keys()].reverse();
 
+  /** Debug output has to survive being pasted into a shell command: one line, bounded, newlines shown. */
+  const truncateForDebug = (value: string, max: number): string => {
+    const flat = value.replace(/\r/g, "").replace(/\n/g, " ⏎ ");
+    return flat.length <= max ? flat : `${flat.slice(0, max)}...`;
+  };
+
+  const resolveDebugTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
+    loadProjectVars(cwd);
+    let max = DEBUG_TRUNCATE_CHARS;
+    if (attrs.max !== undefined) {
+      const parsed = Number(attrs.max);
+      if (!Number.isFinite(parsed) || parsed < 1) return { missing: `max="${attrs.max}" is not a number of characters` };
+      max = Math.min(Math.floor(parsed), MAX_REF_VALUE_CHARS);
+    }
+    const show = attrs.full === "true" ? MAX_REF_VALUE_CHARS : max;
+    const id = attrs.id;
+    if (id === undefined) {
+      const ids = varNames();
+      if (ids.length === 0) return { missing: 'no variables yet - give any tag id="…" or write <pi-var id="mini" value="…" />' };
+      return {
+        value: ids
+          .map((key) => {
+            const entry = varStore.get(key)!;
+            return `${key} = ${truncateForDebug(entry.value, show)}  (from ${entry.source}, ${entry.value.length} chars)`;
+          })
+          .join("\n"),
+      };
+    }
+    if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
+    const stored = varStore.get(id);
+    if (stored === undefined) {
+      const known = varNames();
+      return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " yet"}` };
+    }
+    return { value: truncateForDebug(stored.value, show) };
+  };
+
   const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
     const id = attrs.id ?? attrs.var ?? attrs.name;
     if (!id) return { missing: '<pi-var /> needs id="mini" (and value="…" to define it)' };
@@ -1559,6 +1601,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         return { direct: { kind: "var", attrs } };
       case "vars":
         return { direct: { kind: "vars", attrs } };
+      case "debug":
+        return { direct: { kind: "debug", attrs } };
       default:
         return { error: `unknown reference element <${tag}>` };
     }
@@ -1626,7 +1670,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         used.push(original);
         // Whatever a tag resolved to is remembered, so `id="…"` or <pi-vars /> can cite it again.
         const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
-        if (bare !== "var" && bare !== "vars") captureVar(resolved.value, candidate.attrs, `<${candidate.tag}>`);
+        if (bare !== "var" && bare !== "vars" && bare !== "debug") captureVar(resolved.value, candidate.attrs, `<${candidate.tag}>`);
       } else {
         out += original;
         if (resolved.missing) missing.push(resolved.missing);

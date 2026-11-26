@@ -40,6 +40,7 @@ What the session already knows, so the agent stops guessing it:
 <pi-var name="mini" />                                            …and use it as many times as you like
 <pi-var name="mini" append="true" />  <pi-var name="mini" unset="true" />  add a line, remove it
 <pi-vars />                                                       list what the agent named
+<pi-debug id="mini" />                       the value, cut at 150 characters with "..."
 <pi-pr n="12" />                                                  a tag you defined in JSON
 ```
 
@@ -59,6 +60,11 @@ id="target" />` then `<pi-var id="target" />`. Without an id the value is still 
 `append="true"`, `unset="true"`, `part="source|length"`, and `persist="true"` (writes
 `.pi/pi-inline-vars.json`, so the next session starts with it) work on any of them. Named ids are never
 evicted; anonymous captures are the first to be dropped when the store fills.
+
+**`pi-debug` is how you look at one.** `<pi-debug id="target" />` prints the stored value cut at 150 characters
+with `...` — bounded and single-line (newlines show as `⏎`) so it survives being pasted into a shell command.
+`max="600"` widens the cut, `full="true"` prints all of it, and `<pi-debug />` with no id dumps every variable
+with its source and its real length. Debugging an unknown id refuses and lists the ids that do exist.
 
 **Every built-in refuses loudly when it finds nothing, and the refusal names what does exist — a guess is only
 useful if a wrong one is visible. The `pi-` prefix exists so a tag is never confused with
@@ -242,10 +248,10 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-93 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+102 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
 `format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`,
-`var`/`vars` including a value that contains a tag, an id captured from another tag, and `persist` writing to
-`.pi/`), every user tag shape (`value`, `template`, `hook`, `js` script file, `pattern`), a missing script file
+`var`/`vars`/`debug` including a value that contains a tag, an id captured from another tag, the 150-character
+debug cut with `max`/`full`, and `persist` writing to `.pi/`), every user tag shape (`value`, `template`, `hook`, `js` script file, `pattern`), a missing script file
 reported at load, a throwing hook, a malformed and an out-of-range `offset`, a regex that matches nothing, an
 invalid pattern, `@scope/pkg` and HTML left alone, assistant message rewriting, your own input being expanded,
 the prompt hook, the model gate, `disableTags`, guidance carrying every tag and its description, and config

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- **`<pi-debug id="…" />`** prints what a variable actually holds, cut at 150 characters with `...`. The output
+  is single-line (newlines shown as `⏎`) so it survives being pasted into a shell command; `max="600"` widens the
+  cut, `full="true"` prints all of it, and `<pi-debug />` with no id dumps every variable with its source and its
+  real length. An unknown id refuses and lists the ids that do exist.
+- The guidance now lists `pi-debug`, and the built-in tag list in the selftest checks its spelling.
+
 ## 0.3.1
 
 - **A tag inside a shell-quoted command now resolves.** Found by running a real session: the model wrote

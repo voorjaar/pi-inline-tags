@@ -483,8 +483,51 @@ const guidance = await described.userMessage("run the suite");
 assert("guidance: a user tag ships with its description so the model knows what it is for",
   guidance.some((line) => line.includes("<pi-host") && line.includes("the mac mini every bench command runs on")), guidance.join("\n").slice(0, 400));
 assert("guidance: every built-in tag is listed with how to write it",
-  ["<pi-ref type=", "<pi-date value=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
+  ["<pi-ref type=", "<pi-date value=", "<pi-debug id=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
     .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
+
+// --- pi-debug: what a variable actually holds, bounded so it survives being pasted into a command -------
+
+const longValue = "x".repeat(200);
+await session.call("bash", { command: `echo <pi-var id="long" value="${longValue}" />` });
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="long" />' });
+assert('tool arg: <pi-debug id="…" /> prints the value cut at 150 characters with "..."',
+  !outcome.blocked && outcome.input.command === `echo ${"x".repeat(150)}...`, outcome.input.command.slice(0, 80));
+
+await session.call("bash", { command: 'echo <pi-var id="short" value="mini.local" />' });
+outcome = await session.call("bash", { command: 'echo <pi-debug id="short" />' });
+assert("tool arg: a short value is printed whole, with no ellipsis",
+  !outcome.blocked && outcome.input.command === "echo mini.local", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="long" max="20" />' });
+assert('tool arg: max="20" narrows the cut', !outcome.blocked && outcome.input.command === `echo ${"x".repeat(20)}...`, outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="long" full="true" />' });
+assert('tool arg: full="true" prints all of it', !outcome.blocked && outcome.input.command === `echo ${longValue}`, outcome.input.command.slice(0, 60));
+
+await session.call("bash", { command: 'echo <pi-var id="two" value="line one" />' });
+await session.call("bash", { command: 'echo <pi-var id="two" value="line two" append="true" />' });
+outcome = await session.call("bash", { command: 'echo <pi-debug id="two" />' });
+assert("tool arg: a multi-line value stays on one line, newlines shown as ⏎",
+  !outcome.blocked && /line one ⏎ line two/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" id="target" /> <pi-debug id="target" />' });
+assert("tool arg: <pi-debug /> reads back anything another tag stored under an id",
+  !outcome.blocked && /bench\/(eval_suite|rank_all)\.py bench\/(eval_suite|rank_all)\.py/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug />' });
+assert("tool arg: <pi-debug /> with no id dumps the variables with their source and length",
+  !outcome.blocked && /long = x{150}\.\.\.  \(from pi-var, 200 chars\)/.test(outcome.input.command) && /target = /.test(outcome.input.command),
+  outcome.input.command.slice(0, 200));
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="nope" />' });
+assert("tool arg: debugging an unknown id lists the ids that do exist",
+  !!outcome.blocked && /no variable id="nope" is defined - defined: /.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="short" max="abc" />' });
+assert("tool arg: a non-numeric max is refused rather than guessed",
+  !!outcome.blocked && /max="abc" is not a number of characters/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 // A model that quotes its command writes the tag with shell escapes, which is how it really arrives.
 outcome = await session.call("bash", { command: 'echo "the date is <pi-date value=\\"date\\" /> and the link <pi-ref type=\\"url\\" offset=\\"-1\\" />"' });
