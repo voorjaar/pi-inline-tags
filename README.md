@@ -126,14 +126,14 @@ answer names which note it picked.
 
 Names go in JSON, code goes in one file per tag. Write the name bare in config, use it with the `pi-` prefix:
 
-```json
+```jsonc
 {
   "tags": {
-    "prod":   { "value": "ssh deploy@prod.example.com", "description": "the box deploys run on" },
-    "pr":     { "template": "https://github.com/acme/app/pull/{n}", "attrs": ["n"], "description": "link to a pull request by number" },
-    "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.acme.dev/t/{1}", "description": "your own [[ticket 42]] syntax, expanded to its URL" },
-    "due":    { "js": true, "description": "the date the current task is due" },
-    "shot":   { "js": "tools/shot.js", "attrs": ["days"], "description": "path to a screenshot taken N days ago" }
+    "prod":   { "value": "ssh deploy@prod.example.com", "description": "the box deploys run on" },                      // a constant
+    "pr":     { "template": "https://github.com/acme/app/pull/{n}", "attrs": ["n"], "description": "link to a pull request by number" },   // filled from attributes
+    "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.acme.dev/t/{1}", "description": "your own [[ticket 42]] syntax, expanded to its URL" }, // your own syntax
+    "due":    { "js": true, "description": "the date the current task is due" },                                          // code in <config dir>/tags/due.js
+    "shot":   { "hook": "shot", "attrs": ["days"], "description": "path to a screenshot taken N days ago" }              // code in your hooks file
   }
 }
 ```
@@ -142,20 +142,30 @@ Names go in JSON, code goes in one file per tag. Write the name bare in config, 
 in `/tags`. A tag without one is a name the model does not know how to use, so it invents a shell command instead.
 A `js` tag may carry `export const description = "…"` in its own file, which is used when the config has none.
 
-| how | written | becomes |
-| --- | --- | --- |
-| `value` | `<pi-prod />` | `ssh deploy@prod.example.com` |
-| `template` | `<pi-pr n="12" />` | `https://github.com/acme/app/pull/12` |
-| `pattern` | `[[ticket 42]]` | `https://tracker.acme.dev/t/42` — your own syntax, your own regex |
-| `hook` | `<pi-shot days="2" />` | whatever your `shot()` returns |
-| `js` | `<pi-due />` | whatever the default export of `~/.pi/agent/tags/due.js` returns |
+| how | declared as | written | becomes |
+| --- | --- | --- | --- |
+| `value` | `{ "value": "ssh deploy@prod.example.com" }` | `<pi-prod />` | `ssh deploy@prod.example.com` |
+| `template` | `{ "template": "…/pull/{n}", "attrs": ["n"] }` | `<pi-pr n="12" />` | `https://github.com/acme/app/pull/12` |
+| `pattern` | `{ "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "…/t/{1}" }` | `[[ticket 42]]` anywhere in the text | `https://tracker.acme.dev/t/42` — your own syntax, your own regex |
+| `hook` | `{ "hook": "shot" }` | `<pi-shot days="2" />` | whatever `shot()` in your hooks file returns |
+| `js` | `{ "js": true }` | `<pi-due />` | whatever the default export of `<config dir>/tags/due.js` returns |
 
 `{n}` and `{1}` come from attributes or capture groups; a missing one refuses the call and names the attribute.
 `disableTags` drops a built-in you do not want.
 
-**A tag's code is a file** — `~/.pi/agent/tags/<name>.js`, one default export. `"js": true` finds it by tag name,
-a path (`"js": "tools/shot.js"`) resolves against the config directory, and naming a tag with no other kind finds
-the script automatically.
+**A tag's code is a file** — one default export, found by the tag's own name. `"js": true` means
+`<config dir>/tags/<name>.js` (then `<config dir>/<name>.js`), so `"due": { "js": true }` runs
+`~/.pi/agent/tags/due.js`. A path (`"js": "tools/shot.js"`) resolves against the config directory, and naming a
+tag with no other kind finds the script automatically.
+
+```js
+// ~/.pi/agent/tags/due.js   - the file "due": { "js": true } points at
+export const description = "the date the task named in the last message is due";
+export default (attrs, ctx) => {
+  const days = Number(attrs.in ?? "7");
+  return ctx.date("date", `+${days}d`);        // 2026-12-03
+};
+```
 
 ```js
 // ~/.pi/agent/tags/sum.js
