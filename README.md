@@ -2,10 +2,9 @@
 
 **Let the agent name a fact it already has instead of retyping it from memory.**
 
-A tag is a small HTML-shaped element the agent writes inside a tool call. Before the tool runs, the extension
-replaces it with the real thing from the session: the URL the user pasted, the path that actually exists on disk,
-the number a benchmark printed, the id of a background task, a date, a git branch. If a reference cannot be
-resolved, the call is **refused** and the refusal says what does exist.
+A tag is an element the agent writes inside a tool call that the extension replaces, before the tool runs, with
+the real thing from the session — a pasted URL, a path that exists on disk, a number a benchmark printed, a task
+id — and a tag it cannot resolve refuses the call and names what does exist.
 
 ```
 agent writes:  echo <pi-file pattern="bench/*rank*" />
