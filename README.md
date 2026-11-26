@@ -132,8 +132,8 @@ Names go in JSON, code goes in one file per tag. Write the name bare in config, 
     "prod":   { "value": "ssh deploy@prod.example.com", "description": "the box deploys run on" },                      // a constant
     "pr":     { "template": "https://github.com/acme/app/pull/{n}", "attrs": ["n"], "description": "link to a pull request by number" },   // filled from attributes
     "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.acme.dev/t/{1}", "description": "your own [[ticket 42]] syntax, expanded to its URL" }, // your own syntax
-    "due":    { "js": true, "description": "the date the current task is due" },                                          // code in <config dir>/tags/due.js
-    "shot":   { "hook": "shot", "attrs": ["days"], "description": "path to a screenshot taken N days ago" }              // code in your hooks file
+    "due":    { "js": "tags/due.js", "description": "the date the current task is due" },                                 // code in a file you wrote
+    "shot":   { "js": "tags/shot.js", "attrs": ["days"], "description": "path to a screenshot taken N days ago" }        // same, with attributes
   }
 }
 ```
@@ -147,19 +147,18 @@ A `js` tag may carry `export const description = "…"` in its own file, which i
 | `value` | `{ "value": "ssh deploy@prod.example.com" }` | `<pi-prod />` | `ssh deploy@prod.example.com` |
 | `template` | `{ "template": "…/pull/{n}", "attrs": ["n"] }` | `<pi-pr n="12" />` | `https://github.com/acme/app/pull/12` |
 | `pattern` | `{ "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "…/t/{1}" }` | `[[ticket 42]]` anywhere in the text | `https://tracker.acme.dev/t/42` — your own syntax, your own regex |
-| `hook` | `{ "hook": "shot" }` | `<pi-shot days="2" />` | whatever `shot()` in your hooks file returns |
-| `js` | `{ "js": true }` | `<pi-due />` | whatever the default export of `<config dir>/tags/due.js` returns |
+| `js` | `{ "js": "tags/due.js", "attrs": ["in"] }` | `<pi-due in="3" />` | whatever the default export of that file returns |
 
 `{n}` and `{1}` come from attributes or capture groups; a missing one refuses the call and names the attribute.
 `disableTags` drops a built-in you do not want.
 
-**A tag's code is a file** — one default export, found by the tag's own name. `"js": true` means
-`<config dir>/tags/<name>.js` (then `<config dir>/<name>.js`), so `"due": { "js": true }` runs
-`~/.pi/agent/tags/due.js`. A path (`"js": "tools/shot.js"`) resolves against the config directory, and naming a
-tag with no other kind finds the script automatically.
+**A tag's code is a file** — one default export per tag, and the config names that file:
+`"js": "tags/due.js"`. The path is tried as given (absolute or `~`), then against the config directory, then
+against its `tags/` directory; a name without `.js` gets the extension added. There is no shorthand and no
+implicit lookup — a tag with no `value`, `template`, or `js` is a config problem, not a hidden script.
 
 ```js
-// ~/.pi/agent/tags/due.js   - the file "due": { "js": true } points at
+// ~/.pi/agent/tags/due.js   - the file "due": { "js": "tags/due.js" } points at
 export const description = "the date the task named in the last message is due";
 export default (attrs, ctx) => {
   const days = Number(attrs.in ?? "7");
@@ -184,11 +183,13 @@ Declare `"children": true` and the tag may be written with a body; the function 
 <pi-table sep=" | "><pi-var id="file" /><pi-var id="lines" /></pi-table>   →   src/auth/login.ts | 148
 ```
 
-`ctx` carries what is useful: `attrs`, `type`, `index`, `modifier`, `match`, `cwd`, `model`, `env()`, `now()`,
-`date("date", "+3d")`, `message("-2", "url", "1")`, `userMessages`.
+`ctx` carries what is useful: `attrs`, `children`, `body`, `type`, `index`, `modifier`, `match`, `cwd`, `model`,
+`env()`, `now()`, `date("date", "+3d")`, `message("-2", "url", "1")`, `userMessages`. Script code is bounded by
+`scriptTimeoutMs` (default 2000) and cached for `scriptCacheSeconds` (default 5); code that throws or returns
+nothing **refuses the call** and says the script returned nothing.
 
-Hooks live in `<config dir>/pi-inline-tags.hooks.js` (`export const due = ({ modifier }) => …`,
-`export async function screenshot({ attrs }) { … }`), and `promptHook` adds one line to the agent's prompt.
+`promptHook` names a tag whose text is appended to the agent's guidance, e.g.
+`"promptHook": "house_rules"` with `"house_rules": { "value": "re-measure before quoting a speed number" }`.
 
 ---
 
@@ -234,11 +235,11 @@ Config is optional — defaults apply to every model. `~/.pi/agent/pi-inline-tag
   "enabled": true,
   "models": [],
   "disableTags": [],
-  "tags": { "prod": { "value": "ssh deploy@prod.example.com", "description": "the deploy box" }, "due": { "js": true, "description": "the date the current task is due" } },
+  "tags": { "prod": { "value": "ssh deploy@prod.example.com", "description": "the deploy box" }, "due": { "js": "tags/due.js", "description": "the date the current task is due" } },
   "vars": { "staging": "staging.example.com" },
   "skillRoots": [],
-  "hooksFile": "~/.pi/agent/pi-inline-tags.hooks.js",
-  "hookTimeoutMs": 2000
+  "promptHook": "prod",
+  "scriptTimeoutMs": 2000
 }
 ```
 
@@ -264,10 +265,10 @@ npm test          # node --experimental-strip-types selftest.mjs
 126 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
 `format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill` including a file
 inside the skill, `var` with a composing body, `debug`, `memory` with fuzzy matching and `all`), every user tag
-shape (`value`, `template`, `hook`, `script file`, `pattern`, `children`), a missing script file reported at load,
-a throwing hook, malformed and out-of-range offsets, unclosed and unmatched bodies, retired tags and old attribute
+shape (`value`, `template`, `js` file, `pattern`, `children`), a missing script file reported at load,
+tag code that throws (the call is refused), malformed and out-of-range offsets, unclosed and unmatched bodies, retired tags and old attribute
 names, a regex that matches nothing, an invalid pattern, `@scope/pkg` and HTML left alone, assistant message
-rewriting, your own input being expanded, the prompt hook, the model gate, `disableTags`, and config problem
+rewriting, your own input being expanded, the prompt note tag, the model gate, `disableTags`, and config problem
 reporting.
 
 ## License

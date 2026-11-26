@@ -17,10 +17,9 @@ function assert(label, condition, detail = "") {
   console.log(`FAIL ${label}${detail ? `\n     ${detail}` : ""}`);
 }
 
-function makeSession(name, configBody, hooksSource, cwdOverride) {
+function makeSession(name, configBody, cwdOverride) {
   const configPath = join(sandbox, name);
   writeFileSync(configPath, JSON.stringify(configBody));
-  if (hooksSource !== undefined) writeFileSync(join(sandbox, "pi-inline-tags.hooks.js"), hooksSource);
   process.env.PI_INLINE_TAGS_CONFIG = configPath;
 
   const handlers = { before_agent_start: [], tool_call: [], message_end: [], input: [] };
@@ -91,12 +90,6 @@ function makeSession(name, configBody, hooksSource, cwdOverride) {
   return { commands, notices, ctx, call, userMessage, assistant, typed, record };
 }
 
-const hooksSource = `
-export const due = ({ modifier }) => \`due:\${modifier ?? "none"}\`;
-export async function shot({ attrs }) { return \`shot:\${attrs.days ?? "0"}\`; }
-export function boom() { throw new Error("hook exploded"); }
-`;
-
 const probe = new Date();
 probe.setDate(probe.getDate() + 3);
 const pad = (value) => String(value).padStart(2, "0");
@@ -107,6 +100,9 @@ mkdirSync(join(sandbox, "tags"), { recursive: true });
 writeFileSync(join(sandbox, "tags", "due7.js"), "export default (attrs, ctx) => ctx.date('date', '+3d');\n");
 writeFileSync(join(sandbox, "tags", "sum.js"), "export default (attrs) => String(Number(attrs.a) + Number(attrs.b));\n");
 writeFileSync(join(sandbox, "tags", "lasturl.js"), "export default (attrs, ctx) => ctx.message('-2', 'url');\n");
+writeFileSync(join(sandbox, "tags", "due3.js"), "export default (attrs) => `due:${attrs.modifier ?? 'none'}`;\n");
+writeFileSync(join(sandbox, "tags", "shot.js"), "export default async (attrs) => `shot:${attrs.days ?? '0'}`;\n");
+writeFileSync(join(sandbox, "tags", "boom.js"), "export default () => { throw new Error('tag code exploded'); };\n");
 
 const session = makeSession(
   "main.json",
@@ -114,15 +110,17 @@ const session = makeSession(
     tags: {
       host: { value: "ssh macminister.local" },
       pr: { template: "https://github.com/voorjaar/v1gate/pull/{n}", attrs: ["n"] },
-      shot: { hook: "shot", attrs: ["days"] },
-      due7: { js: true },
+      shot: { js: "tags/shot.js", attrs: ["days"] },
+      due3: { js: "tags/due3.js", attrs: ["modifier"] },
+      boom: { js: "tags/boom.js" },
+      note: { value: "re-measure on the mini before quoting a speed number" },
+      due7: { js: "tags/due7.js" },
       sum: { js: "sum.js", attrs: ["a", "b"] },
-      lasturl: { description: "the URL from two messages back" },
+      lasturl: { js: "tags/lasturl.js", description: "the URL from two messages back" },
       ticket: { pattern: "\\[\\[ticket\\s+(\\d+)\\]\\]", template: "https://tracker.local/t/{1}" },
     },
-    promptHook: "due",
+    promptHook: "note",
   },
-  hooksSource,
 );
 
 // --- user messages feed the references -------------------------------------------------------------
@@ -178,14 +176,14 @@ assert("tool arg: a script tag can read the conversation through ctx.message", !
 outcome = await session.call("fetch_content", { url: "[[ticket 42]]" });
 assert("tool arg: a user-defined pattern tag is matched and filled", !outcome.blocked && outcome.input.url === "https://tracker.local/t/42", outcome.input.url);
 
-outcome = await session.call("bash", { command: 'echo <pi-due modifier="+3d" />' });
-assert("tool arg: a JS hook from the hooks file returns the text", !outcome.blocked && outcome.input.command === "echo due:+3d", outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-due3 modifier="+3d" />' });
+assert("tool arg: a script tag reads its own attributes", !outcome.blocked && outcome.input.command === "echo due:+3d", outcome.input.command);
 
 outcome = await session.call("bash", { command: "echo <shot days=\"2\" />" });
-assert("tool arg: an async hook receives the element attributes", !outcome.blocked && outcome.input.command === "echo shot:2", outcome.input.command);
+assert("tool arg: an async script tag receives the element attributes", !outcome.blocked && outcome.input.command === "echo shot:2", outcome.input.command);
 
 outcome = await session.call("bash", { command: "echo <pi-boom />" });
-assert("tool arg: a hook that throws leaves the text alone instead of breaking the call", !outcome.blocked && outcome.input.command === "echo <pi-boom />", outcome.input.command);
+assert("tool arg: tag code that throws refuses the call and says the script returned nothing", !!outcome.blocked && /returned nothing/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 outcome = await session.call("bash", { command: 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>' });
 assert("tool arg: @scope/pkg and real HTML are not touched", !outcome.blocked && outcome.input.command === 'npm i @sinclairzx81/typebox && echo <div class="x">hi</div>', outcome.input.command);
@@ -219,11 +217,11 @@ assert(
 const transformed = await session.typed('open <pi-ref type="url" offset="-2" /> today');
 assert("user input: what you type is expanded too", transformed?.action === "transform" && transformed.text === "open https://cdn.example.com/shots/a1b2c3.png today", JSON.stringify(transformed));
 
-// --- prompt hook, tag summaries, gate, and config reporting ------------------------------------------
+// --- prompt note, tag summaries, gate, and config reporting ------------------------------------------
 
 assert(
-  "promptHook: a hook's text is appended to the system prompt",
-  first.some((line) => line.includes("User prompt hook due: due:")),
+  "promptHook: a tag's text is appended to the system prompt",
+  first.some((line) => line.includes("User prompt note (note): re-measure on the mini")),
   first.join("\n"),
 );
 assert(
@@ -235,10 +233,31 @@ assert(
 const gated = makeSession("gated.json", { models: ["llama-cpp"] });
 assert("model gate: unlisted models do not get the guidance", (await gated.userMessage("https://example.com/x")).length === 0);
 
+// the "js": true shorthand is gone, and a tag is not secretly a script
+const shorthand = makeSession("shorthand.json", { tags: { ghost: { js: true } } });
+await shorthand.userMessage("x");
+await shorthand.commands.refs.handler("", shorthand.ctx);
+assert('config: { "js": true } is refused and names the path spelling', shorthand.notices.some((n) => n.includes('tag "ghost".js must name a script file') && n.includes('"js": "tags/ghost.js"')), shorthand.notices.join(" | "));
+
+const nameOnly = makeSession("name-only.json", { tags: { orphan: { description: "looks like a tag" } } });
+await nameOnly.userMessage("x");
+await nameOnly.commands.refs.handler("", nameOnly.ctx);
+assert('config: a tag with only a description is not an implicit script', nameOnly.notices.some((n) => n.includes('tag "orphan" needs value, template, or js')), nameOnly.notices.join(" | "));
+
 const bad = makeSession("bad.json", { tags: { broken: { js: "nope.js" } } });
 await bad.userMessage("x");
 await bad.commands.refs.handler("", bad.ctx);
 assert("config: a tag whose script file is missing is reported, not silently dropped", bad.notices.some((note) => /does not point at a readable file/.test(note)), bad.notices.join("\n"));
+
+const retiredHook = makeSession("retired-hook.json", { tags: { shot: { hook: "shot" } } });
+await retiredHook.userMessage("x");
+await retiredHook.commands.refs.handler("", retiredHook.ctx);
+assert('config: a hook declaration is refused and names the js spelling', retiredHook.notices.some((n) => n.includes('tag "shot".hook is gone') && n.includes('"js": "tags/shot.js"')), retiredHook.notices.join(" | "));
+
+const retiredKeys = makeSession("retired-keys.json", { hookTimeoutMs: 3000, hookCacheSeconds: 9, hooksFile: "~/.pi/agent/pi-inline-tags.hooks.js" });
+await retiredKeys.userMessage("x");
+await retiredKeys.commands.refs.handler("", retiredKeys.ctx);
+assert('config: hookTimeoutMs / hookCacheSeconds / hooksFile are refused with the new spelling', retiredKeys.notices.some((n) => n.includes('hookTimeoutMs is gone')) && retiredKeys.notices.some((n) => n.includes('hookCacheSeconds is gone')) && retiredKeys.notices.some((n) => n.includes('hooksFile is gone')), retiredKeys.notices.join(" | "));
 
 const disabled = makeSession("off.json", { enabled: false });
 await disabled.userMessage("https://example.com/y");
@@ -304,7 +323,7 @@ assert('tool arg: an unknown % token is left as written, a known one is filled',
 
 const tomorrow = new Date(now.getTime() + 86_400_000);
 writeFileSync(join(sandbox, "tags", "fmt.js"), 'export default (attrs, ctx) => ctx.date("date", "+1d", "%Y/%m/%d");\n');
-const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: true } } });
+const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: "tags/fmt.js" } } });
 await fmtTag.userMessage("x");
 const fmtOutcome = await fmtTag.call("bash", { command: "echo <pi-fmt />" });
 assert("script tag: ctx.date(kind, offset, format) formats", !fmtOutcome.blocked && fmtOutcome.input.command === `echo ${tomorrow.getFullYear()}/${pad2(tomorrow.getMonth() + 1)}/${pad2(tomorrow.getDate())}`, fmtOutcome.input.command);
@@ -376,7 +395,7 @@ assert('tool arg: part="cwd" is the working directory the tools are using', !out
 outcome = await session.call("bash", { command: 'echo <pi-session part="os" />' });
 assert('tool arg: part="os" names the platform', !outcome.blocked && /^echo [a-z]+-[a-z0-9_]+$/.test(outcome.input.command), outcome.input.command);
 
-const gitSession = makeSession("git.json", {}, undefined, process.cwd());
+const gitSession = makeSession("git.json", {}, process.cwd());
 outcome = await gitSession.call("bash", { command: "echo <pi-repo />" });
 assert('tool arg: <pi-repo /> is the repository root', !outcome.blocked && outcome.input.command === `echo ${process.cwd()}`, outcome.input.command);
 

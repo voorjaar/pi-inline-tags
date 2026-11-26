@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0
+
+One way to write tag code: the `js` file. The hooks file and the `"js": true` shorthand are gone.
+
+- **`"js": true` is gone.** A script tag names its own file: `{ "js": "tags/due.js" }`. The path is tried as given
+  (absolute or `~`), then against the config directory, then against its `tags/` directory; a name without `.js`
+  gets the extension added.
+- **No implicit lookup.** A tag declared with only a `description` used to become a hidden script found by name. It
+  is now a config problem that names the kinds a tag may be.
+- **The hooks file is gone** — `pi-inline-tags.hooks.js`, `hooksFile`, and `{ "hook": "shot" }`. A hook and a `js`
+  tag were the same thing (user code that returns text) with two declarations, two argument shapes
+  (`({ attrs })` versus `(attrs, ctx)`), and two failure rules: a throwing hook left `<pi-boom />` in the command,
+  throwing script code refused the call. The refusal is kept.
+- **`promptHook` names a tag**, so the line added to the agent's prompt is written with the same mechanism as
+  everything else: `"promptHook": "house_rules"` with `"house_rules": { "value": "re-measure before quoting a number" }`.
+- **`hookTimeoutMs` and `hookCacheSeconds` are renamed** to `scriptTimeoutMs` and `scriptCacheSeconds`. The old
+  names are refused with the new spelling instead of being ignored.
+- 130 selftest checks.
+
 ## 0.8.1
 
 Audit of the agent-facing guidance against the code that answers it.

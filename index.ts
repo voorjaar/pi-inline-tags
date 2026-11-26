@@ -47,7 +47,7 @@
  * are used instead of `@tokens` because tool arguments and prose are full of `@scope/package`, email addresses
  * and npm names. Every other tag name is yours, declared in `tags` by its bare name (`"pr"` is written
  * `<pi-pr />`), with a `description` so the model is told what it is for; its text can be a literal, a
- * template, a hook, or JavaScript you wrote in the JSON itself.
+ * template, or JavaScript you wrote in a file.
  *
  * Config: `<agentDir>/pi-inline-tags.json` (override with PI_INLINE_TAGS_CONFIG):
  *   {
@@ -57,18 +57,17 @@
  *     "expandToolCalls": true,
  *     "expandAssistant": true,
  *     "expandUserInput": true,
- *     "promptHook": "morning_note",           // a hook whose text is appended to the system prompt
- *     "hookTimeoutMs": 2000,
- *     "hookCacheSeconds": 5,
+ *     "promptHook": "morning_note",           // name of a tag whose text is appended to the system prompt
+ *     "scriptTimeoutMs": 2000,
+ *     "scriptCacheSeconds": 5,
  *     "disableTags": ["date"],                // drop a default tag
  *     "skillRoots": ["~/my-skills"],          // extra places <pi-skill /> looks
  *     "vars": { "box": "macminister.local" },  // variables that start defined
  *     "tags": {
  *       "host":   { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" },
  *       "pr":     { "template": "https://github.com/voorjaar/v1gate/pull/{n}", "attrs": ["n"] },
- *       "shot":   { "hook": "screenshot", "attrs": ["days"] },
- *       "due":    { "js": true },                     // <agentDir>/tags/due.js: export default (attrs, ctx) => …
- *       "shot":   { "js": "tools/shot.js" },          // or a path, resolved against the config dir
+ *       "due":    { "js": "tags/due.js" },            // export default (attrs, ctx) => …
+ *       "shot":   { "js": "tools/shot.js" },          // any path, relative to the config dir
  *       "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.local/t/{1}" }
  *     }
  *   }
@@ -76,12 +75,6 @@
  * A tag's code is one file with one default export (`<agentDir>/tags/<name>.js`):
  *   export const description = "the URL from two messages back";
  *   export default (attrs, ctx) => ctx.message('-2', 'url');
- *
- * Hooks (JS, ESM; default file `<config dir>/pi-inline-tags.hooks.js`, override with `hooksFile`):
- *   export const host = () => "ssh macminister.local";
- *   export const due = ({ modifier, attrs }) => shiftDueDate(modifier ?? attrs.days);
- *   export async function screenshot({ attrs }) { return latestShot(attrs.days); }
- *   export const tags = { shot: { hook: "screenshot" } };   // a hook file may declare tags too
  *
  * Environment: `PI_INLINE_TAGS=off` disables everything. `/refs` lists what resolves,
  * `/inline-tags status|on|off` inspects the extension.
@@ -96,7 +89,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const CONFIG_FILE_NAME = "pi-inline-tags.json";
 const CONFIG_PATH_ENV = "PI_INLINE_TAGS_CONFIG";
-const HOOKS_FILE_NAME = "pi-inline-tags.hooks.js";
 
 const DEFAULT_REF_INDEX_SIZE = 6;
 const DEFAULT_HOOK_TIMEOUT_MS = 2000;
@@ -121,19 +113,17 @@ const VAR_FILE_NAME = "pi-inline-vars.json";
 const MAX_LIST_ITEMS = 20;
 
 /**
- * A tag's code lives in its own file: `<agentDir>/tags/<name>.js`, one tag per script.
- * `"js": true` or a bare name picks `tags/<name>.js`; a path (`"js": "tools/shot.js"`) is resolved
- * against the config directory, the tags directory, or absolutely.
+ * A tag's code lives in its own file, one tag per script, and the config names that file:
+ * `"js": "tags/due.js"`. The path is tried absolutely, against the config directory, and against the tags
+ * directory; a name without `.js` gets the extension added. There is no shorthand - a tag with no `js` is
+ * not secretly a script.
  */
-function resolveTagScript(name: string, value: string | boolean, configDir: string): string | undefined {
+function resolveTagScript(name: string, value: string, configDir: string): string | undefined {
   const tagsDir = join(configDir, "tags");
   const candidates: string[] = [];
-  if (value === true) candidates.push(join(tagsDir, `${name}.js`), join(configDir, `${name}.js`));
-  else {
-    const given = expandHome(value);
-    if (given.endsWith(".js")) candidates.push(given, join(configDir, given), join(tagsDir, given));
-    else candidates.push(join(tagsDir, `${given}.js`), join(configDir, `${given}.js`), join(tagsDir, `${name}.js`));
-  }
+  const given = expandHome(value);
+  if (given.endsWith(".js")) candidates.push(given, join(configDir, given), join(tagsDir, given));
+  else candidates.push(`${given}.js`, join(configDir, `${given}.js`), join(tagsDir, `${given}.js`), join(tagsDir, `${name}.js`));
   for (const candidate of candidates) {
     try {
       if (statSync(candidate).isFile()) return candidate;
@@ -351,17 +341,16 @@ const RETIRED_TAGS: Record<string, string> = {
 
 type TagSpec = {
   name: string;
-  kind: "builtin" | "value" | "template" | "hook" | "script";
+  kind: "builtin" | "value" | "template" | "script";
   value?: string;
   template?: string;
-  hook?: string;
   script?: string;
   pattern?: string;
   attrs?: string[];
   /** true when this tag may be written as <pi-name …>body</pi-name> and wants the resolved children. */
   children?: boolean;
   description?: string;
-  source: "builtin" | "config" | "hooks";
+  source: "builtin" | "config";
 };
 
 /** What a `js` tag body may reach for. No require/import: the context carries what is useful. */
@@ -393,10 +382,10 @@ type Config = {
   expandToolCalls: boolean;
   expandAssistant: boolean;
   expandUserInput: boolean;
+  /** Name of a tag whose text is appended to the system prompt. */
   promptHook: string;
-  hooksFile: string;
-  hookTimeoutMs: number;
-  hookCacheSeconds: number;
+  scriptTimeoutMs: number;
+  scriptCacheSeconds: number;
   disableTags: string[];
   skillRoots: string[];
   vars: Record<string, string>;
@@ -411,9 +400,8 @@ const DEFAULT_CONFIG: Config = {
   expandAssistant: true,
   expandUserInput: true,
   promptHook: "",
-  hooksFile: "",
-  hookTimeoutMs: DEFAULT_HOOK_TIMEOUT_MS,
-  hookCacheSeconds: DEFAULT_HOOK_CACHE_SECONDS,
+  scriptTimeoutMs: DEFAULT_HOOK_TIMEOUT_MS,
+  scriptCacheSeconds: DEFAULT_HOOK_CACHE_SECONDS,
   disableTags: [],
   skillRoots: [],
   vars: {},
@@ -460,15 +448,12 @@ function parseTag(rawName: string, raw: unknown, configDir: string): { spec?: Ta
     given.push("template");
   }
   if (entry.hook !== undefined) {
-    if (typeof entry.hook !== "string") return { problem: `tag "${name}".hook must be a hook name string` };
-    spec.kind = "hook";
-    spec.hook = entry.hook;
-    given.push("hook");
+    return { problem: `tag "${name}".hook is gone - hook files are gone; the one way to write code is { "js": "tags/${name}.js" }` };
   }
   const script = entry.js ?? entry.script ?? entry.file;
   if (script !== undefined) {
-    if (typeof script !== "string" && script !== true) {
-      return { problem: `tag "${name}".js must be a script path or true (inline JavaScript bodies are gone; the code lives in <agentDir>/tags/${name}.js)` };
+    if (typeof script !== "string" || script.trim().length === 0) {
+      return { problem: `tag "${name}".js must name a script file - write { "js": "tags/${name}.js" } (there is no "js": true shorthand, and no implicit script lookup)` };
     }
     const found = resolveTagScript(name, script, configDir);
     if (!found) return { problem: `tag "${name}".js does not point at a readable file - write one tag per script under ${join(configDir, "tags")}/` };
@@ -476,13 +461,8 @@ function parseTag(rawName: string, raw: unknown, configDir: string): { spec?: Ta
     spec.script = found;
     given.push("js");
   }
-  if (given.length > 1) return { problem: `tag "${name}" sets ${given.join(" and ")}; use one of value, template, hook, js` };
-  if (given.length === 0) {
-    // A file in tags/ is a tag even when the config only names it.
-    const discovered = resolveTagScript(name, true, configDir);
-    if (discovered) { spec.kind = "script"; spec.script = discovered; }
-    else spec.kind = "builtin";
-  }
+  if (given.length > 1) return { problem: `tag "${name}" sets ${given.join(" and ")}; use one of value, template, js` };
+  if (given.length === 0) spec.kind = "builtin";
   if (entry.pattern !== undefined) {
     if (typeof entry.pattern !== "string") return { problem: `tag "${name}".pattern must be a regex source string` };
     if (entry.pattern.length > MAX_PATTERN_CHARS) return { problem: `tag "${name}".pattern is longer than ${MAX_PATTERN_CHARS} characters` };
@@ -504,7 +484,7 @@ function parseTag(rawName: string, raw: unknown, configDir: string): { spec?: Ta
     spec.description = entry.description.slice(0, 300);
   }
   if (spec.kind === "builtin" && !BUILTIN_TAGS.includes(name) && !spec.pattern) {
-    return { problem: `tag "${name}" needs value, template, hook, or js (a pattern alone needs one of them to produce text)` };
+    return { problem: `tag "${name}" needs value, template, or js (a pattern alone needs one of them to produce text)` };
   }
   return { spec };
 }
@@ -554,21 +534,20 @@ function readConfig(): { path: string; config: Config; problems: string[] } {
   }
   if (raw.promptHook !== undefined) {
     if (typeof raw.promptHook === "string") config.promptHook = raw.promptHook;
-    else problems.push("promptHook must be a hook name string");
+    else problems.push("promptHook must name a tag");
   }
-  if (raw.hooksFile !== undefined) {
-    if (typeof raw.hooksFile === "string") config.hooksFile = raw.hooksFile;
-    else problems.push("hooksFile must be a path string");
+  if (raw.hooksFile !== undefined) problems.push('hooksFile is gone - hook files are gone; a tag names its own code with { "js": "tags/<name>.js" }');
+  if (raw.hookTimeoutMs !== undefined) problems.push('hookTimeoutMs is gone - write "scriptTimeoutMs"');
+  if (raw.scriptTimeoutMs !== undefined) {
+    const value = Number(raw.scriptTimeoutMs);
+    if (Number.isInteger(value) && value >= 100 && value <= 15000) config.scriptTimeoutMs = value;
+    else problems.push("scriptTimeoutMs must be an integer between 100 and 15000");
   }
-  if (raw.hookTimeoutMs !== undefined) {
-    const value = Number(raw.hookTimeoutMs);
-    if (Number.isInteger(value) && value >= 100 && value <= 15000) config.hookTimeoutMs = value;
-    else problems.push("hookTimeoutMs must be an integer between 100 and 15000");
-  }
-  if (raw.hookCacheSeconds !== undefined) {
-    const value = Number(raw.hookCacheSeconds);
-    if (Number.isInteger(value) && value >= 0 && value <= 3600) config.hookCacheSeconds = value;
-    else problems.push("hookCacheSeconds must be an integer between 0 and 3600");
+  if (raw.hookCacheSeconds !== undefined) problems.push('hookCacheSeconds is gone - write "scriptCacheSeconds"');
+  if (raw.scriptCacheSeconds !== undefined) {
+    const value = Number(raw.scriptCacheSeconds);
+    if (Number.isInteger(value) && value >= 0 && value <= 3600) config.scriptCacheSeconds = value;
+    else problems.push("scriptCacheSeconds must be an integer between 0 and 3600");
   }
   if (raw.vars !== undefined) {
     if (raw.vars && typeof raw.vars === "object" && !Array.isArray(raw.vars)) {
@@ -606,21 +585,6 @@ function readConfig(): { path: string; config: Config; problems: string[] } {
 // --- what a reference can point at ---------------------------------------------------------------
 
 type UserMessage = { n: number; text: string; urls: string[]; paths: string[] };
-
-type HookContext = {
-  name: string;
-  attrs: Record<string, string>;
-  /** Resolved values of the tags inside <pi-name …>body</pi-name>, left to right. Empty when written self-closing. */
-  children: string[];
-  /** The body exactly as written, before its tags were resolved. */
-  body: string;
-  modifier?: string;
-  match?: string;
-  model?: string;
-  cwd: string;
-  userMessages: number;
-};
-type HookFn = (ctx: HookContext) => string | Promise<string>;
 
 function captureMessage(text: string, n: number): UserMessage {
   const urls = (text.match(URL_PATTERN) ?? []).slice(0, 12);
@@ -776,56 +740,6 @@ function fillTemplate(template: string, attrs: Record<string, string>): { text?:
   return missing.length > 0 ? { text, missing } : { text };
 }
 
-async function loadHooks(path: string, configDir: string): Promise<{ hooks: Map<string, HookFn>; tags: TagSpec[]; problems: string[] }> {
-  const hooks = new Map<string, HookFn>();
-  const tags: TagSpec[] = [];
-  if (!path) return { hooks, tags, problems: [] };
-  const resolved = expandHome(path);
-  if (!existsSync(resolved)) return { hooks, tags, problems: [] };
-  let module: Record<string, unknown>;
-  try {
-    const stat = statSync(resolved);
-    if (stat.size > 512_000) return { hooks, tags, problems: [`hooks file is larger than 512 KB: ${resolved}`] };
-    module = (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
-  } catch (error) {
-    return { hooks, tags, problems: [`could not load hooks from ${resolved}: ${String(error)}`] };
-  }
-
-  const exported: Record<string, unknown> = {};
-  const defaultExport = module.default;
-  if (defaultExport && typeof defaultExport === "object" && !Array.isArray(defaultExport)) {
-    Object.assign(exported, defaultExport as Record<string, unknown>);
-  }
-  for (const [key, value] of Object.entries(module)) {
-    if (key === "default") continue;
-    exported[key] = value;
-  }
-
-  const problems: string[] = [];
-  for (const [key, value] of Object.entries(exported)) {
-    if (key === "tags") {
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        problems.push("hooks export \"tags\" must be an object of tag definitions");
-        continue;
-      }
-      for (const [name, definition] of Object.entries(value as Record<string, unknown>)) {
-        const result = parseTag(name, definition, configDir);
-        if (result.spec) tags.push({ ...result.spec, source: "hooks" });
-        if (result.problem) problems.push(result.problem);
-      }
-      continue;
-    }
-    if (!validTagName(key)) {
-      problems.push(`hooks export "${key}" is not a usable name`);
-      continue;
-    }
-    if (typeof value === "function") hooks.set(key, value as HookFn);
-    else if (typeof value === "string") hooks.set(key, () => value);
-    else problems.push(`hooks export "${key}" must be a function or a string`);
-  }
-  return { hooks, tags, problems };
-}
-
 // --- activation --------------------------------------------------------------------------------
 
 export default function piInlineTags(pi: ExtensionAPI): void {
@@ -834,26 +748,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   const envSwitch = (process.env.PI_INLINE_TAGS ?? "").trim().toLowerCase();
   let enabled = config.enabled && envSwitch !== "off" && envSwitch !== "0";
 
-  const hooksPath = config.hooksFile ? expandHome(config.hooksFile) : join(dirname(loaded.path), HOOKS_FILE_NAME);
-  let hooks = new Map<string, HookFn>();
-  const hookProblems: string[] = [];
-  const hooksReady = loadHooks(hooksPath, dirname(loaded.path)).then((result) => {
-    hooks = result.hooks;
-    hookProblems.push(...result.problems);
-    // Tags the hook file declares are merged in, so a JS file can define syntax too, not just values.
-    for (const spec of result.tags) if (!config.tags[spec.name]) config.tags[spec.name] = spec;
-    // A hook function is callable as a tag as well, so `due` in the hooks file means <pi-due modifier="+3d" />.
-    for (const name of result.hooks.keys()) {
-      if (config.tags[name] || BUILTIN_TAGS.includes(name)) continue;
-      config.tags[name] = { name, kind: "hook", hook: name, source: "hooks" };
-    }
-    rebuildScanners();
-    return hooks;
-  });
-
   const userMessages: UserMessage[] = [];
   const seenTexts = new Set<string>();
-  const hookCache = new Map<string, { at: number; value: string }>();
+  const scriptCache = new Map<string, { at: number; value: string }>();
   const applied: string[] = [];
 
   // --- the scanner is built from what is configured, not from a fixed pattern ---------------------
@@ -911,29 +808,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return model ? `${model.provider ?? ""}/${model.id ?? ""}` : undefined;
   };
 
-  const callHook = async (name: string, info: Omit<HookContext, "name">): Promise<string | undefined> => {
-    const fn = hooks.get(name);
-    if (!fn) return undefined;
-    const cacheKey = `${name}|${Object.entries(info.attrs).sort().join(",")}|${info.modifier ?? ""}|${(info as { body?: string }).body ?? ""}`;
-    const hit = hookCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < config.hookCacheSeconds * 1000) return hit.value;
-    const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.hookTimeoutMs));
-    let outcome: unknown;
-    try {
-      outcome = await Promise.race([Promise.resolve(fn({ name, ...info })).catch(() => undefined), timeout]);
-    } catch {
-      outcome = undefined;
-    }
-    if (typeof outcome !== "string" || !outcome.trim()) {
-      note(`hook ${name} returned nothing`);
-      return undefined;
-    }
-    const value = outcome.slice(0, MAX_REF_VALUE_CHARS);
-    hookCache.set(cacheKey, { at: Date.now(), value });
-    return value;
-  };
-
-  /** The only tokens the extension builds itself: `u-1.url2` from <pi-ref type="url" offset="-1" index="2" />. */
   const resolveUserMessagePart = (token: string): { value?: string; missing?: string } => {
     const userMatch = USER_REF.exec(token);
     if (!userMatch) return {};
@@ -975,24 +849,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (depthOf(attrs) < MAX_REF_DEPTH) return { value: filled.text };
       return { value: filled.text };
     }
-    if (spec.kind === "hook") {
-      const value = await callHook(spec.hook ?? spec.name, {
-        attrs,
-        children: bodyRef?.parts ?? [],
-        body: bodyRef?.raw ?? "",
-        modifier: attrs.modifier ?? attrs.offset,
-        model: modelOf(ctx),
-        cwd: process.cwd(),
-        userMessages: userMessages.length,
-      });
-      // Hooks are user code and may be flaky (network, ssh): the text stays as written and /refs records it.
-      return value === undefined ? {} : { value };
-    }
     if (spec.kind === "script") {
       const value = await runTagCode(spec, attrs, ctx, bodyRef);
       return value === undefined ? { missing: `tag <${TAG_PREFIX}${spec.name}> script ${spec.script ?? ""} returned nothing (its default export must return a string)` } : { value };
     }
-    return { missing: `tag <${spec.name}> has no value, template, hook, or js` };
+    return { missing: `tag <${spec.name}> has no value, template, or js` };
   };
 
   const tagFunctions = new Map<string, TagFn>();
@@ -1037,9 +898,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       tagFunctions.set(spec.name, fn);
     }
     const cacheKey = `script:${spec.name}|${Object.entries(attrs).sort().join(",")}|${bodyRef?.raw ?? ""}`;
-    const hit = hookCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < config.hookCacheSeconds * 1000) return hit.value;
-    const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.hookTimeoutMs));
+    const hit = scriptCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < config.scriptCacheSeconds * 1000) return hit.value;
+    const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.scriptTimeoutMs));
     let outcome: unknown;
     try {
       outcome = await Promise.race([Promise.resolve(fn(attrs, tagContextFor(spec, attrs, ctx, bodyRef))).catch(() => undefined), timeout]);
@@ -1051,7 +912,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       return undefined;
     }
     const value = outcome.slice(0, MAX_REF_VALUE_CHARS);
-    hookCache.set(cacheKey, { at: Date.now(), value });
+    scriptCache.set(cacheKey, { at: Date.now(), value });
     return value;
   };
 
@@ -2007,8 +1868,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const attrs = spec.attrs && spec.attrs.length > 0 ? spec.attrs.map((key) => `${key}="…"`).join(" ") : "";
       const how = spec.kind === "value" ? `fixed text${spec.value ? `: ${spec.value.slice(0, 80)}` : ""}`
         : spec.kind === "template" ? `template ${String(spec.template).slice(0, 120)}`
-        : spec.kind === "js" ? "JavaScript you defined"
-        : `hook ${spec.hook ?? spec.name}`;
+        : "JavaScript you defined";
       const pattern = spec.pattern ? ` matched by ${spec.pattern}` : "";
       const described = spec.description ? `${spec.description} - ` : "";
       return `${described}<${TAG_PREFIX}${spec.name}${attrs ? ` ${attrs}` : ""} /> (${how})`;
@@ -2022,7 +1882,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled) return;
-    await hooksReady;
     const userEvent = event as { messageType?: string; prompt?: string };
     if (userEvent.messageType === "user" && typeof userEvent.prompt === "string") recordUser(userEvent.prompt);
 
@@ -2037,9 +1896,12 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (index.length > 0) guidelines.push(`References available now: ${index.join(" · ")}`);
     const own = userTagSummaries();
     if (own.length > 0) guidelines.push(`Your own tags: ${own.join(" · ")}`);
-    if (config.promptHook && hooks.has(config.promptHook)) {
-      const custom = await callHook(config.promptHook, { attrs: {}, model: modelOf(ctx), cwd: process.cwd(), userMessages: userMessages.length });
-      if (custom) guidelines.push(`User prompt hook ${config.promptHook}: ${custom.slice(0, MAX_GUIDELINE_CHARS)}`);
+    if (config.promptHook) {
+      const spec = config.tags[config.promptHook];
+      if (spec) {
+        const resolved = await resolveSpec(spec, {}, ctx);
+        if (resolved.value) guidelines.push(`User prompt note (${spec.name}): ${resolved.value.slice(0, MAX_GUIDELINE_CHARS)}`);
+      }
     }
     // The reference rules are cheap and useful for every model; the model gate only hides them where the
     // user does not want the extra tokens at all.
@@ -2048,7 +1910,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   pi.on("message_end", async (event) => {
     if (!enabled || !config.expandAssistant) return;
-    await hooksReady;
     const message = event.message as { role?: string; content?: unknown } | undefined;
     if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
     let changed = false;
@@ -2082,7 +1943,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   pi.on("input", async (event) => {
     if (!enabled || !config.expandUserInput) return;
-    await hooksReady;
     const text = typeof event.text === "string" ? event.text : "";
     if (!text.includes("<") && !text.includes("@")) return;
     const result = await expandText(text, 0, undefined);
@@ -2093,7 +1953,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event, ctx) => {
     if (!enabled || !config.expandToolCalls) return;
-    await hooksReady;
     const input = event.input as Record<string, unknown> | undefined;
     if (!input || typeof input !== "object") return;
     const result = await expandValue(input, 0, ctx);
@@ -2117,21 +1976,18 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   pi.registerCommand("refs", {
     description: "List the references that resolve right now",
     handler: async (_args, ctx) => {
-      await hooksReady;
       const lines = refIndexLines();
-      const own = [...userTagSummaries(), ...[...hooks.keys()].filter((name) => !Object.values(config.tags).some((spec) => (spec.hook ?? spec.name) === name)).map((name) => `<pi-ref type="tag" name="${name}" /> (hook only)`)];
+      const own = userTagSummaries();
       ctx.ui.notify(
         [
           `user messages: ${userMessages.length} → <pi-ref type="url" offset="-1" /> is the newest, offset="-${userMessages.length}" the oldest`,
           lines.length > 0 ? `links and paths seen:\n${lines.map((line) => `  ${line}`).join("\n")}` : "no URLs or paths pasted yet",
-          own.length > 0 ? `yours:\n${own.map((line) => `  ${line}`).join("\n")}` : "no tags or hooks configured",
+          own.length > 0 ? `yours:\n${own.map((line) => `  ${line}`).join("\n")}` : "no tags configured",
           `dates: <pi-date value="date|datetime|time|today|yesterday|tomorrow|week|year" offset="+3d|-2h|+10m|+1w" /> (or <pi-ref type="date" ... />)`,
           ...BUILTIN_TAGS.filter((name) => !config.disableTags.includes(name)).map((name) => BUILTIN_GUIDE[name] ?? `<${TAG_PREFIX}${name} />`),
-          [...loaded.problems, ...hookProblems].length > 0
-            ? `problems: ${[...loaded.problems, ...hookProblems].join("; ")}`
-            : `hooks ok (${hooks.size} from ${hooksPath})`,
+          loaded.problems.length > 0 ? `problems: ${loaded.problems.join("; ")}` : "config ok",
         ].join("\n"),
-        [...loaded.problems, ...hookProblems].length > 0 ? "warning" : "info",
+        loaded.problems.length > 0 ? "warning" : "info",
       );
     },
   });
@@ -2142,11 +1998,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const sub = (args ?? "").trim().toLowerCase() || "status";
       if (sub === "on" || sub === "off") enabled = sub === "on";
       const recent = applied.slice(-5).map((line) => `  ${line}`).join("\n");
-      const problems = [...loaded.problems, ...hookProblems];
+      const problems = loaded.problems;
       ctx.ui.notify(
         [
-          `inline-tags=${enabled ? "on" : "off"} · expand: toolCalls=${config.expandToolCalls ? "on" : "off"} assistant=${config.expandAssistant ? "on" : "off"} input=${config.expandUserInput ? "on" : "off"} · messages=${userMessages.length} · tags=${tagNames.length}+${tagPatterns.length}pattern · hooks=${hooks.size} · promptHook=${config.promptHook || "none"}`,
-          `model gate matched now=${modelMatches(ctx) ? "yes" : "no"} · config=${loaded.path} · hooksFile=${hooksPath}`,
+          `inline-tags=${enabled ? "on" : "off"} · expand: toolCalls=${config.expandToolCalls ? "on" : "off"} assistant=${config.expandAssistant ? "on" : "off"} input=${config.expandUserInput ? "on" : "off"} · messages=${userMessages.length} · tags=${tagNames.length}+${tagPatterns.length}pattern · promptHook=${config.promptHook || "none"}`,
+          `model gate matched now=${modelMatches(ctx) ? "yes" : "no"} · config=${loaded.path}`,
           problems.length > 0 ? `problems: ${problems.join("; ")}` : "config ok",
           recent ? `recent expansions:\n${recent}` : "no expansions applied yet",
         ].join("\n"),
