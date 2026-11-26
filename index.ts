@@ -25,7 +25,8 @@
  *   <pi-env name="HF_ENDPOINT" default="" />    the value of an environment variable
  *   <pi-skill name="lilypond-music" />          the absolute path of an installed skill
  *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
- *   <pi-vars />                                 list every captured value and which tag produced it
+ *   <pi-join id="cmd" parts="host,dir" sep=" && " />  glue stored values into one reusable value
+ *   <pi-memory name="bash suite axis" />        a project memory note (.memory/), matched loosely; all="true" lists them
  *   <pi-debug id="mini" />                      inspect a variable like a console would: the value cut at 50
  *                                             chars, then its length, the tag that produced it (no angle
  *                                             brackets, so a rewrite pass cannot expand it again), and when it
@@ -34,7 +35,7 @@
  *   <pi-pr n="12" />                            a tag you defined in JSON
  *
  * Every tag also stores what it resolved to: give it `id="target"` and `<pi-var id="target" />` cites it
- * again; without an id it gets a random one, which `<pi-vars />` lists with its source.
+ * again; without an id it gets a random one, which `<pi-debug />` lists with its source.
  *
  * `offset` picks the message, `index` picks the entry inside it. Every built-in refuses loudly when it finds
  * nothing, and the refusal names what does exist - a guess is only useful if a wrong one is visible.
@@ -112,6 +113,7 @@ const MAX_VARS = 60;
 const DEBUG_TRUNCATE_CHARS = 50;
 const MAX_AUTO_VARS = 24;
 const DEBUG_SOURCE_CHARS = 120;
+const MAX_MEMORY_FILES = 400;
 const VAR_FILE_NAME = "pi-inline-vars.json";
 const MAX_LIST_ITEMS = 20;
 
@@ -185,16 +187,18 @@ const BUILTIN_GUIDE: Record<string, string> = {
   ref: '<pi-ref type="url|path|line|text|number|regex|date" offset="-1" index="2" pattern="…" format="%Y-%m" scope="session" /> - a part of what the user pasted (offset picks the message, index the entry inside it)',
   date: '<pi-date value="date|datetime|time|today|yesterday|tomorrow|week|year" offset="+3d" format="%Y-%m" /> - a computed date',
   file: '<pi-file pattern="bench/*.py" index="1" sort="recent|name" absolute="true" all="true" /> - a path that really exists on disk instead of one you invented',
-  task: '<pi-task status="running" match="bench" part="id|name|status|command|output|exit|age" all="true" /> - a background task of this project',
-  tool: '<pi-tool index="1" part="name|description" match="web" scope="active|registered" all="true" /> - a tool the session really has (also <pi-tools />)',
+  task: '<pi-task status="running" pattern="bench" part="id|name|status|command|output|exit|age" all="true" /> - a background task of this project',
+  tool: '<pi-tool index="1" part="name|description" pattern="web" scope="active|registered" all="true" /> - a tool the session really has (also <pi-tools />)',
   repo: '<pi-repo part="root|branch|head|remote|dirty" /> - the git repository this session is in',
   session: '<pi-session part="id|name|model|provider|cwd|dir|file|os" /> - this session id, model, working directory',
   history: '<pi-history pattern="eval_suite" part="command|tool|args" all="true" /> - an earlier tool call, so you do not retype it',
   result: '<pi-result pattern="prefill" part="text|tool" context="240" full="true" error="true" all="true" /> - what an earlier tool call returned',
   env: '<pi-env name="HF_ENDPOINT" default="" /> - the value of an environment variable',
   skill: '<pi-skill name="lilypond-music" file="scripts/x.py" /> - the absolute path of an installed skill',
-  var: '<pi-var id="mini" value="plain text" /> defines it (a value is never another tag), <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line, <pi-vars /> lists them',
+  var: '<pi-var id="mini" value="plain text" /> defines it (a value is never another tag), <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line',
   debug: '<pi-debug id="mini" /> inspects it the way a console prints a variable: the value cut at 50 characters, then its length, the tag that produced it and when it was stored (max="600" widens it, full="true" prints all of it, quiet="true" prints only the value, no id dumps every variable)',
+  join: '<pi-join id="cmd" parts="host,dir,args" sep=" && " /> - glue stored values into one value you can reuse',
+  memory: '<pi-memory name="bash suite" part="description|name|type|path|body" all="true" /> - a project memory note, matched loosely',
   store: 'to keep what a command printed, put the id on the reference instead: <pi-result pattern="prefill" id="speed" /> then <pi-var id="speed" />',
 };
 
@@ -335,7 +339,11 @@ const PATH_PATTERN = /(?:~|\/)[A-Za-z0-9_./-]{3,}/g;
 
 /** The shipped defaults. `tags` in the config adds to them, `disableTags` removes from them. */
 const TAG_PREFIX = "pi-";
-const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "vars", "debug"];
+const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "debug", "join", "memory"];
+// Spelled out so an old habit gets a correction instead of being left in the text untouched.
+const RETIRED_TAGS: Record<string, string> = {
+  vars: '<pi-vars /> is gone - <pi-debug /> lists every variable with its source',
+};
 
 type TagSpec = {
   name: string;
@@ -843,6 +851,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const disabled = new Set(config.disableTags);
     const specs: TagSpec[] = [];
     for (const name of BUILTIN_TAGS) if (!disabled.has(name)) specs.push({ name, kind: "builtin", source: "builtin" });
+    for (const name of Object.keys(RETIRED_TAGS)) if (!disabled.has(name)) specs.push({ name, kind: "builtin", source: "builtin" });
     for (const spec of Object.values(config.tags)) if (!disabled.has(spec.name)) specs.push(spec);
     const spellings: string[] = [];
     for (const spec of specs) {
@@ -1021,7 +1030,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const resolveDateAttrs = (attrs: Record<string, string>): { value?: string; missing?: string } => {
     const kind = attrs.value ?? attrs.kind ?? "date";
-    const format = attrs.format ?? attrs.style;
+    const format = attrs.format;
     if (format !== undefined && format.length > 64) return { missing: `format="${format}" is longer than 64 characters` };
     const value = dateValue(kind, attrs.offset, format);
     return value
@@ -1047,8 +1056,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (request.kind === "env") return resolveEnvTag(attrs);
     if (request.kind === "skill") return resolveSkillTag(attrs, cwd);
     if (request.kind === "var") return resolveVarTag(attrs, cwd);
-    if (request.kind === "vars") return resolveVarsTag();
     if (request.kind === "debug") return resolveDebugTag(attrs, cwd);
+    if (request.kind === "join") return resolveJoinTag(attrs, cwd);
+    if (request.kind === "memory") return resolveMemoryTag(attrs, cwd);
     const offset = attrs.offset ?? attrs.message ?? "-1";
     if (!/^-?\d+$/.test(offset)) return { missing: `offset="${offset}" must be a message offset (offset="-1" is the most recent)` };
     const requested = Number(offset);
@@ -1073,7 +1083,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         : { missing: `no ${ordinal}${ordinal === 1 ? "st" : ordinal === 2 ? "nd" : ordinal === 3 ? "rd" : "th"} number in ${where} (${found.length} found)` };
     }
 
-    const pattern = attrs.pattern ?? attrs.source;
+    const pattern = attrs.pattern;
     if (!pattern) return { missing: '<pi-ref type="regex" /> needs pattern="…"' };
     if (pattern.length > MAX_PATTERN_CHARS) return { missing: `pattern is longer than ${MAX_PATTERN_CHARS} characters` };
     let regex: RegExp;
@@ -1168,7 +1178,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   const resolveFileTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
-    const pattern = attrs.pattern ?? attrs.glob;
+    const pattern = attrs.pattern;
     if (!pattern) return { missing: '<pi-file /> needs pattern="bench/*.py" (relative to the working directory, or absolute /… or ~/…)' };
     if (pattern.length > MAX_PATTERN_CHARS) return { missing: `pattern is longer than ${MAX_PATTERN_CHARS} characters` };
     const { base, inner } = scanRoot(pattern, cwd);
@@ -1199,7 +1209,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const records = readTaskRecords([join(cwd, ".pi", "tasks"), join(homedir(), ".pi", "tasks")], MAX_TASK_RECORDS);
     const status = (attrs.status ?? "any").toLowerCase();
     const wanted = status === "any" || status === "all" ? undefined : status;
-    const filter = attrs.match;
+    const filter = attrs.pattern;
     const hits = records.filter((task) => {
       if (wanted && task.status !== wanted) return false;
       if (filter && findPattern(`${task.name} ${task.command}`, filter).start === -1) return false;
@@ -1247,9 +1257,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     })();
     const scope = (attrs.scope ?? "active").toLowerCase();
     const pool = scope === "registered" || scope === "all" ? registered : registered.filter((tool) => active.includes(tool.name));
-    const hits = attrs.match ? pool.filter((tool) => findPattern(`${tool.name} ${tool.description}`, attrs.match).start !== -1) : pool;
+    const hits = attrs.pattern ? pool.filter((tool) => findPattern(`${tool.name} ${tool.description}`, attrs.pattern).start !== -1) : pool;
     if (hits.length === 0) {
-      return { missing: `no tool matches${attrs.match ? ` match="${attrs.match}"` : ""} in the ${scope} tool set (${active.length} active: ${active.slice(0, 12).join(", ")})` };
+      return { missing: `no tool matches${attrs.pattern ? ` pattern="${attrs.pattern}"` : ""} in the ${scope} tool set (${active.length} active: ${active.slice(0, 12).join(", ")})` };
     }
     if (attrs.all === "true") return { value: hits.slice(0, MAX_LIST_ITEMS).map((tool) => `${tool.name}${tool.description ? ` - ${tool.description.slice(0, 120)}` : ""}`).join("\n") };
     const ordinal = Number(attrs.index ?? "1") || 1;
@@ -1293,7 +1303,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   const resolveHistoryTag = (attrs: Record<string, string>, ctx: ExtensionContext | undefined): { value?: string; missing?: string } => {
-    const pattern = attrs.pattern ?? attrs.match;
+    const pattern = attrs.pattern;
     const calls = sessionCalls(ctx);
     const hits = pattern ? calls.filter((call) => findPattern(`${call.tool} ${call.command}`, pattern).start !== -1) : calls;
     if (hits.length === 0) return { missing: `no earlier tool call matches${pattern ? ` pattern="${pattern}"` : ""} (looked at ${calls.length} call${calls.length === 1 ? "" : "s"} in this session)` };
@@ -1307,7 +1317,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   const resolveResultTag = (attrs: Record<string, string>, ctx: ExtensionContext | undefined): { value?: string; missing?: string } => {
-    const pattern = attrs.pattern ?? attrs.match;
+    const pattern = attrs.pattern;
     const results = sessionResults(ctx);
     const scoped = attrs.error === "true" ? results.filter((result) => result.error) : results;
     const hits = pattern
@@ -1331,7 +1341,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   const resolveEnvTag = (attrs: Record<string, string>): { value?: string; missing?: string } => {
-    const name = attrs.name ?? attrs.var;
+    const name = attrs.name;
     if (!name) return { missing: '<pi-env /> needs name="HF_ENDPOINT"' };
     const value = process.env[name];
     if (typeof value === "string" && value) return { value: value.slice(0, MAX_REF_VALUE_CHARS) };
@@ -1531,6 +1541,123 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return { value: describeVar(id, stored, show, quiet) };
   };
 
+  /** Glue stored values together: the only composition the tag set has, and the only way to build a bigger fact. */
+  const resolveJoinTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
+    loadProjectVars(cwd);
+    const parts = (attrs.parts ?? "").split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+    const known = varNames();
+    if (parts.length === 0) {
+      return { missing: `<pi-join id="…" parts="id,id,…" /> needs at least two stored ids${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " (none are defined yet)"}` };
+    }
+    const rawSep = attrs.sep ?? " ";
+    const sep = rawSep === "\\n" || rawSep === "newline" ? "\n" : rawSep;
+    const values: string[] = [];
+    for (const part of parts) {
+      const entry = varStore.get(part);
+      if (!entry) {
+        return { missing: `parts="${parts.join(",")}" names no variable id="${part}"${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " (none are defined)"}` };
+      }
+      values.push(entry.value);
+    }
+    return { value: values.join(sep).slice(0, MAX_REF_VALUE_CHARS) };
+  };
+
+  type MemoryNote = { name: string; description: string; type: string; file: string; body: string };
+  const memoryNotes = new Map<string, MemoryNote[]>();
+
+  const readMemoryNotes = (cwd: string): MemoryNote[] => {
+    const key = cwd;
+    const cached = memoryNotes.get(key);
+    if (cached) return cached;
+    const roots = [join(cwd, ".memory"), join(homedir(), ".pi", "agent", "memories")];
+    const notes: MemoryNote[] = [];
+    for (const root of roots) {
+      if (!existsSync(root)) continue;
+      let names: string[] = [];
+      try {
+        names = readdirSync(root).filter((name) => name.endsWith(".md")).sort();
+      } catch {
+        continue;
+      }
+      for (const name of names.slice(0, MAX_MEMORY_FILES)) {
+        const file = join(root, name);
+        let text = "";
+        try {
+          text = readFileSync(file, "utf8").slice(0, 24000);
+        } catch {
+          continue;
+        }
+        const front = text.match(/^---\n([\s\S]*?)\n---/);
+        const field = (key: string): string => {
+          const hit = front?.[1]?.match(new RegExp(`^${key}:\s*(.*)$`, "m"));
+          return (hit?.[1] ?? "").replace(/^["']|["']$/g, "").trim();
+        };
+        notes.push({
+          name: field("name") || name.replace(/\.md$/, ""),
+          description: field("description"),
+          type: field("type"),
+          file,
+          body: text.slice(front ? front[0].length : 0).trim(),
+        });
+      }
+    }
+    memoryNotes.set(key, notes);
+    return notes;
+  };
+
+  /** Loose matching: an agent remembers the shape of a memory title, not its 90-character slug. */
+  const memoryScore = (query: string, note: MemoryNote): number => {
+    const q = query.toLowerCase().replace(/\.md$/, "").trim();
+    const file = note.file.replace(/\.md$/, "").toLowerCase();
+    const name = note.name.toLowerCase();
+    const title = `${note.name} ${note.description}`.toLowerCase();
+    if (file === q || name === q) return 10000;
+    if (file.endsWith(q) || file.includes(q) || name.includes(q)) return 5000;
+    const tokens = q.split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
+    const present = tokens.filter((token) => title.includes(token) || file.includes(token)).length;
+    if (tokens.length > 0 && present === tokens.length) return 3000 + present * 50;
+    if (present > 0) return 1000 + present * 60;
+    let i = 0;
+    for (const ch of file) {
+      if (ch === q[i]) i += 1;
+      if (i === q.length) return 600;
+    }
+    return 0;
+  };
+
+  const resolveMemoryTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
+    const notes = readMemoryNotes(cwd);
+    if (notes.length === 0) return { missing: "no project memory notes found (.memory/ in this project, then ~/.pi/agent/memories)" };
+    const line = (note: MemoryNote): string => `${note.name}${note.type ? ` (${note.type})` : ""}${note.description ? ` - ${note.description.slice(0, 200)}` : ""}`;
+    if (attrs.all === "true") {
+      const listed = notes.slice(0, MAX_LIST_ITEMS).map(line);
+      return { value: `${notes.length} memory notes\n${listed.join("\n")}${notes.length > listed.length ? `\n(${notes.length - listed.length} more)` : ""}` };
+    }
+    const query = attrs.name ?? attrs.query;
+    if (!query) return { missing: `<pi-memory name="bash suite" /> names one note, all="true" lists them (${notes.length} notes available)` };
+    const ranked = notes
+      .map((note) => ({ note, score: memoryScore(query, note) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score);
+    if (ranked.length === 0) {
+      return { missing: `no memory note matches name="${query}" - ${notes.length} notes, e.g. ${notes.slice(0, 4).map((note) => note.name).join(", ")}` };
+    }
+    const best = ranked[0]!;
+    const part = (attrs.part ?? "description").toLowerCase();
+    if (part === "name") return { value: best.note.name };
+    if (part === "type") return { value: best.note.type || "untyped" };
+    if (part === "path") return { value: best.note.file };
+    if (part === "body") {
+      const max = Math.min(8000, Math.max(200, Number(attrs.max ?? 1500) || 1500));
+      return { value: best.note.body.slice(0, max) };
+    }
+    if (part === "line") return { value: line(best.note) };
+    const runnerUp = ranked[1];
+    const said = best.score >= 5000 ? "" : `  (matched "${best.note.name}")`;
+    const near = runnerUp && runnerUp.score >= best.score - 200 ? `  (also: ${runnerUp.note.name})` : "";
+    return { value: `${best.note.description || best.note.body.slice(0, 300)}${said}${near}` };
+  };
+
   /** A variable holds text, never another reference: that is what keeps `<pi-var id="x" />` predictable. */
   const findTagIn = (text: string): string | undefined => {
     if (!elementScanner || !text.includes("<")) return undefined;
@@ -1576,40 +1703,48 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return { value: stored.value };
   };
 
-  const resolveVarsTag = (): { value?: string; missing?: string } => {
-    loadProjectVars(process.cwd());
-    const ids = varNames();
-    if (ids.length === 0) return { missing: 'no variables yet - give any tag an id="…" or write <pi-var id="mini" value="ssh macminister.local" />' };
-    return {
-      value: ids
-        .map((id) => {
-          const entry = varStore.get(id)!;
-          return `${id} = ${entry.value.slice(0, 120).replace(/\n/g, " ⏎ ")}  (from <${entry.tag}>)`;
-        })
-        .join("\n"),
-    };
-  };
+;
 
   const depthOf = (_attrs: Record<string, string>): number => 0;
 
   type DirectRequest = {
-    kind: "number" | "regex" | "date" | "file" | "task" | "tool" | "repo" | "session" | "history" | "result" | "env" | "skill" | "var" | "vars";
+    kind: "number" | "regex" | "date" | "file" | "task" | "tool" | "repo" | "session" | "history" | "result" | "env" | "skill" | "var" | "debug" | "join" | "memory";
     attrs: Record<string, string>;
   };
 
+  // One name per idea. An alias is not accepted silently: the correction is the point, because a half-accepted
+  // attribute is how a reference resolves to the wrong thing.
+  const ATTRIBUTE_ALIASES: Record<string, string> = { match: "pattern", glob: "pattern", source: "pattern", message: "offset", style: "format" };
+
+  const aliasProblem = (tag: string, attrs: Record<string, string>): string | undefined => {
+    for (const [alias, primary] of Object.entries(ATTRIBUTE_ALIASES)) {
+      if (attrs[alias] !== undefined) {
+        return `<pi-${tag} ${alias}="…" /> is not an attribute - write ${primary}="…"`;
+      }
+    }
+    if (attrs.var !== undefined) {
+      return `<pi-${tag} var="…" /> is not an attribute - write name="…"`;
+    }
+    return undefined;
+  };
+
   const resolveBuiltinElement = (tag: string, attrs: Record<string, string>): { token?: string; error?: string; direct?: DirectRequest } => {
+    if (RETIRED_TAGS[tag]) return { error: RETIRED_TAGS[tag] };
+    const alias = aliasProblem(tag, attrs);
+    if (alias) return { error: alias };
     switch (tag) {
       case "ref": {
         // Canonical: <ref type="url" index="-1" /> - explicit about what and which message.
         const type = (attrs.type ?? "").toLowerCase();
         // offset = which message (-1 is the most recent), index = which entry inside that message.
         if (type === "date") return { direct: { kind: "date", attrs } };
-        const offset = attrs.offset ?? attrs.message ?? "-1";
+        const offset = attrs.offset ?? "-1";
         if (!/^-?\d+$/.test(offset)) return { error: `<pi-ref type="${type}" offset="${offset}" /> - offset must be a message offset, negative to count back from the most recent (-1)` };
         const ordinal = attrs.index ?? "";
         if (type === "url" || type === "path") return { token: `u${offset}.${type}${ordinal}` };
         if (type === "line") return { token: `u${offset}.line${ordinal || "1"}` };
-        if (type === "text" || type === "message" || type === "full") return { token: `u${offset}.text` };
+        if (type === "text") return { token: `u${offset}.text` };
+        if (type === "message" || type === "full") return { error: `<pi-ref type="${type}" /> is not a type - the whole message is type="text"` };
         if (type === "number") return { direct: { kind: "number", attrs } };
         if (type === "regex") return { direct: { kind: "regex", attrs } };
         if (type === "tag" || type === "config" || type === "hook") {
@@ -1645,8 +1780,10 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         return { direct: { kind: "skill", attrs } };
       case "var":
         return { direct: { kind: "var", attrs } };
-      case "vars":
-        return { direct: { kind: "vars", attrs } };
+      case "join":
+        return { direct: { kind: "join", attrs } };
+      case "memory":
+        return { direct: { kind: "memory", attrs } };
       case "debug":
         return { direct: { kind: "debug", attrs } };
       default:
@@ -1714,10 +1851,10 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (resolved.value !== undefined) {
         out += resolved.value;
         used.push(original);
-        // Whatever a tag resolved to is remembered, so `id="…"` or <pi-vars /> can cite it again.
+        // Whatever a tag resolved to is remembered, so `id="…"` or <pi-debug /> can cite it again.
         const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
         // The spelling that produced the value is its provenance: <pi-file pattern="bench/*.py">, not just "file".
-        if (bare !== "var" && bare !== "vars" && bare !== "debug") {
+        if (bare !== "var" && bare !== "debug" && bare !== "vars") {
           captureVar(resolved.value, candidate.attrs, provenanceOf(candidate.token ?? original), candidate.tag ?? bare);
         }
       } else {

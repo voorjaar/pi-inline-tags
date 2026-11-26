@@ -340,10 +340,10 @@ assert("tool arg: a glob that matches nothing says what it looked at", !!outcome
 outcome = await session.call("bash", { command: "echo <pi-task status=\"running\" />" });
 assert('tool arg: <pi-task status="running" /> gives the live task id', !outcome.blocked && outcome.input.command === "echo a11bbbb22", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-task match="publish" part="status" />' });
+outcome = await session.call("bash", { command: 'echo <pi-task pattern="publish" part="status" />' });
 assert('tool arg: part="status" reads the task state', !outcome.blocked && outcome.input.command === "echo completed", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-task match="publish" part="output" />' });
+outcome = await session.call("bash", { command: 'echo <pi-task pattern="publish" part="output" />' });
 assert('tool arg: part="output" gives the task output file', !outcome.blocked && outcome.input.command === "echo .pi/tasks/run1/b34b5bfff.output", outcome.input.command);
 
 outcome = await session.call("bash", { command: "echo <pi-task index=\"9\" />" });
@@ -352,17 +352,17 @@ assert("tool arg: a task index that is out of range is refused", !!outcome.block
 outcome = await session.call("bash", { command: 'echo <pi-tool index="2" />' });
 assert('tool arg: <pi-tool index="2" /> names a tool the session actually has', !outcome.blocked && outcome.input.command === "echo read", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-tool part="description" match="shell" />' });
+outcome = await session.call("bash", { command: 'echo <pi-tool part="description" pattern="shell" />' });
 assert('tool arg: part="description" gives the tool description', !outcome.blocked && outcome.input.command === "echo Run a shell command", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-tool scope="registered" match="sleep" />' });
+outcome = await session.call("bash", { command: 'echo <pi-tool scope="registered" pattern="sleep" />' });
 assert('tool arg: scope="registered" also sees tools not in the active set', !outcome.blocked && outcome.input.command === "echo sleep", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-tool match="never_used_tool_xyz" />' });
-assert("tool arg: an invented tool name is refused with the real list", !!outcome.blocked && /no tool matches match="never_used_tool_xyz" in the active tool set/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+outcome = await session.call("bash", { command: 'echo <pi-tool pattern="never_used_tool_xyz" />' });
+assert("tool arg: an invented tool name is refused with the real list", !!outcome.blocked && /no tool matches pattern="never_used_tool_xyz" in the active tool set/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
-outcome = await session.call("bash", { command: 'echo <pi-tools match="web" />' });
-assert('tool arg: <pi-tools match="…" /> lists the matching tools', !outcome.blocked && /web_search/.test(outcome.input.command), outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-tools pattern="web" />' });
+assert('tool arg: <pi-tools pattern="…" /> lists the matching tools', !outcome.blocked && /web_search/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: "echo <pi-session />" });
 assert('tool arg: <pi-session /> is this session id', !outcome.blocked && outcome.input.command === "echo 01a203bb-c952-707e", outcome.input.command);
@@ -450,11 +450,11 @@ assert('tool arg: any tag with id="…" stores its result for reuse', !outcome.b
 outcome = await session.call("bash", { command: 'echo <pi-var id="target" part="source" />' });
 assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && /^echo pi-file pattern="bench\/\*\.py" id="target"$/.test(outcome.input.command), outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-task status="running" /> <pi-vars />' });
-assert("tool arg: a tag with no id still gets one and shows up in <pi-vars />", !outcome.blocked && /from <pi-task>/.test(outcome.input.command), outcome.input.command.slice(0, 200));
+outcome = await session.call("bash", { command: 'echo <pi-task status="running" /> <pi-debug />' });
+assert("tool arg: a tag with no id still gets one and shows up in <pi-debug />", !outcome.blocked && /from pi-task status="running" \(auto id\)/.test(outcome.input.command), outcome.input.command.slice(0, 300));
 
 outcome = await session.call("bash", { command: "echo <pi-vars />" });
-assert("tool arg: <pi-vars /> lists what the agent has named", !outcome.blocked && /mini = ssh macminister/.test(outcome.input.command), outcome.input.command);
+assert("tool arg: the retired <pi-vars /> is corrected, not left in the text", !!outcome.blocked && /<pi-vars \/> is gone - <pi-debug \/>/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 await session.userMessage("see https://example.com/shot.png");
 outcome = await session.call("bash", { command: `echo <pi-var id="shot" value="<pi-ref type='url' offset='-1' />" />` });
@@ -484,6 +484,50 @@ assert("guidance: a user tag ships with its description so the model knows what 
 assert("guidance: every built-in tag is listed with how to write it",
   ["<pi-ref type=", "<pi-date value=", "<pi-debug id=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
     .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
+
+// --- pi-join: the only composition, and pi-memory: read what the project already learned -----------------
+
+await session.call("bash", { command: 'echo <pi-var id="host" value="ssh macminister.local" />' });
+await session.call("bash", { command: 'echo <pi-var id="dir" value="cd ~/bench" />' });
+
+outcome = await session.call("bash", { command: 'echo <pi-join id="run" parts="host,dir" sep=" && " /> && echo <pi-var id="run" />' });
+assert('tool arg: <pi-join parts="host,dir" sep=" && " /> glues stored values into a reusable value',
+  !outcome.blocked && outcome.input.command === "echo ssh macminister.local && cd ~/bench && echo ssh macminister.local && cd ~/bench", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="run" />' });
+assert("tool arg: a joined value reports the join that produced it",
+  !outcome.blocked && /run = "ssh macminister.local && cd ~\/bench"  \(35 chars, from pi-join id="run" parts="host,dir"/.test(outcome.input.command), outcome.input.command.slice(0, 220));
+
+outcome = await session.call("bash", { command: 'echo <pi-join id="bad" parts="host,ghost" />' });
+assert("tool arg: a join names the part that is missing and lists what exists",
+  !!outcome.blocked && /names no variable id="ghost" - defined: /.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-join />' });
+assert("tool arg: a join with no parts says which ids are defined", !!outcome.blocked && /needs at least two stored ids - defined: /.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+// project memory notes, in the layout this project actually uses
+mkdirSync(join(sandbox, ".memory"), { recursive: true });
+writeFileSync(join(sandbox, ".memory", "bash-suite-is-the-axis-that-actually-separates-workers.md"), "---\nname: bash-suite-is-the-axis-that-actually-separates-workers\ndescription: bash is the quality axis with the widest real spread across 24 measured models\ntype: fact\n---\n\nFrom rank_all.py: 0.800 down to 0.000 on the same 10 tasks.\n");
+writeFileSync(join(sandbox, ".memory", "keep-delete-rule-must-not-delete-a-model-that-never-loaded.md"), "---\nname: keep-delete-rule-must-not-delete-a-model-that-never-loaded\ndescription: a delete decision must read load._status and invalid flags first\ntype: gotcha\n---\n\nLing-3.0-tiny was deleted because the harness never loaded it.\n");
+
+outcome = await session.call("bash", { command: 'echo <pi-memory name="bash suite axis" />' });
+assert('tool arg: <pi-memory name="bash suite axis" /> finds the note without its 60-character slug',
+  !outcome.blocked && /widest real spread/.test(outcome.input.command) && /matched "bash-suite-is-the-axis/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-memory name="keep-delete-rule-must-not-delete-a-model-that-never-loaded" part="path" />' });
+assert('tool arg: part="path" gives the file', !outcome.blocked && outcome.input.command === "echo " + join(sandbox, ".memory", "keep-delete-rule-must-not-delete-a-model-that-never-loaded.md"), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-memory name="never loaded" part="body" max="400" />' });
+assert('tool arg: part="body" reads the note itself', !outcome.blocked && /Ling-3.0-tiny was deleted/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-memory all="true" />' });
+assert('tool arg: all="true" lists the memory notes with their type', !outcome.blocked && /memory notes/.test(outcome.input.command) && /keep-delete-rule-must-not-delete-a-model-that-never-loaded \(gotcha\)/.test(outcome.input.command) && /bash-suite-is-the-axis/.test(outcome.input.command), outcome.input.command.slice(0, 400));
+
+outcome = await session.call("bash", { command: 'echo <pi-memory name="kv cache quantisation" />' });
+assert("tool arg: a memory that does not exist is refused with real examples", !!outcome.blocked && /no memory note matches name="kv cache quantisation" - \d+ notes, e.g./.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-task pattern="publish" match="publish" />' });
+assert("tool arg: an old alias is refused and names the attribute to write", !!outcome.blocked && /match="…" \/> is not an attribute - write pattern="…"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 // --- freezing what a command printed into a variable ---------------------------------------------------
 

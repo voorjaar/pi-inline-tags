@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+- **`<pi-join id="cmd" parts="host,dir" sep=" && " />`** — the first composition: glue stored values into one
+  value you can reuse. A missing part is refused and the refusal lists the ids that do exist. A joined value is
+  stored like any other, so `<pi-debug id="cmd" />` reports the join that produced it.
+- **`<pi-memory name="bash suite axis" />`** reads a project memory note (`.memory/` in the project, then
+  `~/.pi/agent/memories/`). Matching is deliberately loose — exact file/name, then substring, then every token
+  present, then subsequence — because an agent remembers the shape of a title, not its 90-character slug, and the
+  answer names which note it picked. `part="description|name|type|path|body|line"`, `max="400"` for a body, and
+  `all="true"` lists every note with its type.
+- **`<pi-vars />` is gone** (retired, not silently accepted): `<pi-debug />` already lists every variable with its
+  source, so one of the two was redundant. Writing it now answers *"is gone — `<pi-debug />` lists every variable
+  with its source"*.
+- **Old attribute spellings are refused with the correction** instead of being quietly read or quietly dropped:
+  `match`/`glob`/`source` → `pattern`, `message` → `offset`, `style` → `format`, `var` → `name`, and
+  `<pi-ref type="message" />` / `type="full"` → `type="text"`. A half-accepted attribute is how a reference
+  resolves to the wrong thing.
+- Docs rewritten to lead with what the project is and worked examples. 116 selftest checks.
+
 ## 0.6.0
 
 - **A variable's value is never another tag.** `<pi-var id="x" value="<pi-ref … />" />` is refused with a message
