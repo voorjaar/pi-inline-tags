@@ -56,10 +56,23 @@ the call and says which it was.
 
 **Every tag stores what it resolved to.** Give it an id and cite it later — `<pi-file pattern="bench/*.py"
 id="target" />` then `<pi-var id="target" />`. Without an id the value is still kept under a generated one, and
-`<pi-vars />` lists them with the tag each came from. `<pi-var id="mini" value="…" />` names one yourself;
+`<pi-vars />` lists them with the tag each came from. `<pi-var id="mini" value="plain text" />` names one yourself;
 `append="true"`, `unset="true"`, `part="source|length"`, and `persist="true"` (writes
 `.pi/pi-inline-vars.json`, so the next session starts with it) work on any of them. Named ids are never
 evicted; anonymous captures are the first to be dropped when the store fills.
+
+**A value is never another tag.** `<pi-var id="x" value="<pi-ref … />" />` is refused and says so — one tag per
+value is how the store stays predictable. To keep what a command printed, put the id on the reference instead:
+
+```
+sh bench/drive_bench.py …                      # the call that produced the number
+echo <pi-result pattern="prefill" id="speed" />   # freezes what it resolved to
+echo <pi-var id="speed" />                      # reuse it as many times as you like
+echo <pi-debug id="speed" />                    # speed = "prefill 969.2 to…  (69 chars, from pi-result pattern="prefill" id="speed", stored 13:43:40)
+```
+
+The value is the text captured at that moment, so it does not drift when a newer result arrives; a fresh
+`<pi-result pattern="prefill" />` follows the newest one (`index="1"` is the most recent match).
 
 **`pi-debug` is how you look at one**, in the shape a JavaScript console prints it:
 
@@ -256,7 +269,7 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-103 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+106 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
 `format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`,
 `var`/`vars`/`debug` including a value that contains a tag, an id captured from another tag, the 150-character
 debug cut with `max`/`full`, and `persist` writing to `.pi/`), every user tag shape (`value`, `template`, `hook`, `js` script file, `pattern`), a missing script file

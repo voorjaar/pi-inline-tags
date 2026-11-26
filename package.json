@@ -1,6 +1,6 @@
 {
   "name": "pi-inline-tags",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Inline reference tags for pi: <ref u=\"7.url\" />, <date offset=\"+3d\" />, your own tags (value, template, hook, or your own regex), and JS hooks that return text - so the agent cites what you pasted instead of retyping it.",
   "type": "module",
   "main": "index.ts",

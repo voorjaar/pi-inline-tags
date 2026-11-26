@@ -193,8 +193,9 @@ const BUILTIN_GUIDE: Record<string, string> = {
   result: '<pi-result pattern="prefill" part="text|tool" context="240" full="true" error="true" all="true" /> - what an earlier tool call returned',
   env: '<pi-env name="HF_ENDPOINT" default="" /> - the value of an environment variable',
   skill: '<pi-skill name="lilypond-music" file="scripts/x.py" /> - the absolute path of an installed skill',
-  var: '<pi-var id="mini" value="ssh macminister.local" /> defines it, <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line, <pi-vars /> lists them',
-  debug: '<pi-debug id="mini" /> prints what that variable holds, cut at 150 characters with "..." (max="600" widens it, full="true" prints all of it, no id dumps every variable)',
+  var: '<pi-var id="mini" value="plain text" /> defines it (a value is never another tag), <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line, <pi-vars /> lists them',
+  debug: '<pi-debug id="mini" /> inspects it the way a console prints a variable: the value cut at 50 characters, then its length, the tag that produced it and when it was stored (max="600" widens it, full="true" prints all of it, quiet="true" prints only the value, no id dumps every variable)',
+  store: 'to keep what a command printed, put the id on the reference instead: <pi-result pattern="prefill" id="speed" /> then <pi-var id="speed" />',
 };
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".svn", ".hg", "dist", "build", "__pycache__", ".next", ".venv"]);
@@ -1045,12 +1046,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (request.kind === "result") return resolveResultTag(attrs, ctx);
     if (request.kind === "env") return resolveEnvTag(attrs);
     if (request.kind === "skill") return resolveSkillTag(attrs, cwd);
-    if (request.kind === "var") {
-      const stored = resolveVarTag(attrs, cwd);
-      if (stored.value === undefined) return stored;
-      if (!stored.literal && depth < MAX_REF_DEPTH && stored.value.includes("<")) return { value: (await expandText(stored.value, depth + 1, ctx)).text };
-      return stored;
-    }
+    if (request.kind === "var") return resolveVarTag(attrs, cwd);
     if (request.kind === "vars") return resolveVarsTag();
     if (request.kind === "debug") return resolveDebugTag(attrs, cwd);
     const offset = attrs.offset ?? attrs.message ?? "-1";
@@ -1131,10 +1127,10 @@ export default function piInlineTags(pi: ExtensionAPI): void {
           .map((key) => (typeof args[key] === "string" ? (args[key] as string) : undefined))
           .find((value) => value !== undefined) ?? JSON.stringify(args);
         out.push({ tool: String(raw.name ?? ""), command, id: String(raw.id ?? "") });
-        if (out.length >= MAX_HISTORY_SCAN) return out;
+        if (out.length > MAX_HISTORY_SCAN * 2) out.splice(0, out.length - MAX_HISTORY_SCAN); // keep the recent ones
       }
     }
-    return out;
+    return out.reverse(); // index="1" is the most recent, which is what the guidance promises
   };
 
   type ResultRecord = { tool: string; text: string; id: string; error: boolean };
@@ -1148,9 +1144,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         ? (message.content as Array<{ type?: string; text?: string }>).map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n")
         : "";
       out.push({ tool: String(message.toolName ?? ""), text: parts, id: String(message.toolCallId ?? ""), error: message.isError === true });
-      if (out.length >= MAX_HISTORY_SCAN) return out;
+      if (out.length > MAX_HISTORY_SCAN * 2) out.splice(0, out.length - MAX_HISTORY_SCAN); // keep the recent ones
     }
-    return out;
+    return out.reverse(); // index="1" is the most recent, which is what the guidance promises
   };
 
   /** A pattern is a regular expression when it compiles as one, otherwise a plain substring. */
@@ -1535,7 +1531,16 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return { value: describeVar(id, stored, show, quiet) };
   };
 
-  const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string; literal?: boolean } => {
+  /** A variable holds text, never another reference: that is what keeps `<pi-var id="x" />` predictable. */
+  const findTagIn = (text: string): string | undefined => {
+    if (!elementScanner || !text.includes("<")) return undefined;
+    elementScanner.lastIndex = 0;
+    const hit = elementScanner.exec(text);
+    elementScanner.lastIndex = 0;
+    return hit ? hit[0] : undefined;
+  };
+
+  const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
     const id = attrs.id ?? attrs.var ?? attrs.name;
     if (!id) return { missing: '<pi-var /> needs id="mini" (and value="…" to define it)' };
     if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
@@ -1545,6 +1550,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       return { value: "" };
     }
     if (attrs.value !== undefined) {
+      const nested = findTagIn(attrs.value);
+      if (nested) return { missing: `the value of id="${id}" contains ${nested} - a variable holds plain text only. To store what a tag resolved to, put the id on that tag: <pi-result pattern="prefill" id="${id}" />` };
       if (!varStore.has(id) && !makeRoom(true)) return { missing: `${varStore.size} variables are already defined; unset one before adding id="${id}"` };
       const previous = varStore.get(id);
       varStore.set(id, {
@@ -1565,7 +1572,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     }
     if (attrs.part === "length") return { value: String(stored.value.length) };
     // The provenance is text about the value, not another reference to expand.
-    if (attrs.part === "source") return { value: stored.source, literal: true };
+    if (attrs.part === "source") return { value: stored.source };
     return { value: stored.value };
   };
 

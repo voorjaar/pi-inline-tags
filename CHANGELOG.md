@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- **A variable's value is never another tag.** `<pi-var id="x" value="<pi-ref … />" />` is refused with a message
+  that points at the alternative. Storing a reference inside a value made the same id mean different text at
+  different times, and the value had to be re-expanded on every read.
+- **Keeping what a command printed is one step:** `<pi-result pattern="prefill" id="speed" />` freezes the text
+  that reference resolved to, `<pi-var id="speed" />` reuses it, `<pi-debug id="speed" />` shows it with its
+  provenance. The snapshot does not drift when a newer result arrives.
+- **Fix:** `<pi-result>` and `<pi-history>` returned the *oldest* match while the guidance promised
+  `index="1"` is the most recent. Both session scans now return newest-first, and their scan caps keep the
+  recent entries instead of the oldest.
+
 ## 0.5.0
 
 - **`<pi-debug id="…" />` now reports where the value came from**, the way a JavaScript console reports a

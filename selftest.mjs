@@ -458,10 +458,9 @@ assert("tool arg: <pi-vars /> lists what the agent has named", !outcome.blocked 
 
 await session.userMessage("see https://example.com/shot.png");
 outcome = await session.call("bash", { command: `echo <pi-var id="shot" value="<pi-ref type='url' offset='-1' />" />` });
-assert('tool arg: a variable value may itself be a tag', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
-
-outcome = await session.call("bash", { command: 'echo <pi-var id="shot" />' });
-assert('tool arg: reading it back resolves the tag inside it again', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
+assert('tool arg: a value is never another tag - it is refused and points at id="…" on the tag',
+  !!outcome.blocked && /a variable holds plain text only/.test(outcome.blocked.reason) && /<pi-ref type='url' offset='-1' \/>/.test(outcome.blocked.reason),
+  outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-var id="shot" unset="true" />done' });
 assert('tool arg: unset="true" removes it', !outcome.blocked && outcome.input.command === "echo done", outcome.input.command);
@@ -485,6 +484,30 @@ assert("guidance: a user tag ships with its description so the model knows what 
 assert("guidance: every built-in tag is listed with how to write it",
   ["<pi-ref type=", "<pi-date value=", "<pi-debug id=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
     .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
+
+// --- freezing what a command printed into a variable ---------------------------------------------------
+
+session.record({ role: "assistant", content: [{ type: "toolCall", id: "c9", name: "bash", arguments: { command: "sh bench/drive_bench.py" } }] });
+session.record({ role: "toolResult", toolCallId: "c9", toolName: "bash", isError: false, content: [{ type: "text", text: "prefill 969.2 tok/s\ndecode 87.8 tok/s" }] });
+
+outcome = await session.call("bash", { command: 'echo <pi-result pattern="prefill" id="speed" />' });
+assert('tool arg: id="…" on a reference stores what it resolved to', !outcome.blocked && /prefill 969\.2/.test(outcome.input.command), outcome.input.command);
+
+session.record({ role: "assistant", content: [{ type: "toolCall", id: "c10", name: "bash", arguments: { command: "sh bench/drive_bench.py --clean" } }] });
+session.record({ role: "toolResult", toolCallId: "c10", toolName: "bash", isError: false, content: [{ type: "text", text: "prefill 334.6 tok/s\ndecode 22.1 tok/s" }] });
+
+outcome = await session.call("bash", { command: 'echo <pi-var id="speed" /> <pi-result pattern="prefill" />' });
+assert("tool arg: the stored value keeps its snapshot while a fresh reference follows the newest result",
+  !outcome.blocked && /969\.2/.test(outcome.input.command) && /334\.6/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-debug id="speed" />' });
+assert("tool arg: the stored value reports the reference that produced it",
+  !outcome.blocked && /speed = "prefill 969\.2[^"]*"  \(\d+ chars, from pi-result pattern="prefill" id="speed"/.test(outcome.input.command),
+  outcome.input.command.slice(0, 240));
+
+outcome = await session.call("bash", { command: 'echo <pi-history pattern="drive_bench" id="cmd" /> <pi-var id="cmd" />' });
+assert("tool arg: any reference can be named and reused the same way",
+  !outcome.blocked && outcome.input.command === "echo sh bench/drive_bench.py --clean sh bench/drive_bench.py --clean", outcome.input.command);
 
 // --- pi-debug: what a variable actually holds, bounded so it survives being pasted into a command -------
 
