@@ -53,38 +53,14 @@ and returns capture group 1 (or the whole match when there is none); `scope="ses
 through the whole conversation instead of one message, and a pattern that is invalid or matches nothing refuses
 the call and says which it was.
 
-**`pi-var` is the agent's own scratch space.** It names a thing once (`<pi-var name="mini" value="ssh
-macminister.local" />`) and reuses it; the stored text may itself contain tags, so a variable can hold a
-reference. `persist="true"` writes it to `.pi/pi-inline-vars.json` in the project so the next session starts
-with it, and `"vars"` in the config seeds variables.
+**Every tag stores what it resolved to.** Give it an id and cite it later — `<pi-file pattern="bench/*.py"
+id="target" />` then `<pi-var id="target" />`. Without an id the value is still kept under a generated one, and
+`<pi-vars />` lists them with the tag each came from. `<pi-var id="mini" value="…" />` names one yourself;
+`append="true"`, `unset="true"`, `part="source|length"`, and `persist="true"` (writes
+`.pi/pi-inline-vars.json`, so the next session starts with it) work on any of them. Named ids are never
+evicted; anonymous captures are the first to be dropped when the store fills.
 
-## The tags
-
-```
-<pi-ref type="url" offset="-1" />             first URL in the most recent message
-<pi-ref type="url" offset="-1" index="2" />   its second URL
-<pi-ref type="url" offset="7" />              first URL in message 7
-<pi-ref type="path" offset="-1" />            its first path
-<pi-ref type="line" offset="-1" index="3" />  its third non-empty line
-<pi-ref type="text" offset="-1" />            the whole message, verbatim
-<pi-ref type="number" offset="-1" />          the first number in it (index="2" the second)
-<pi-ref type="regex" offset="-1" pattern="issue (\d+)" />  what your own regex captures
-<pi-date value="date" offset="+3d" />        2026-11-29  (datetime, time, today, yesterday, tomorrow, week, year)
-<pi-date format="%Y-%m" />                   any strftime shape: %Y %m %d %F %T %H %M %S %j %V %u %A %B %Q %s
-<pi-pr n="12" />                             a tag you defined in JSON
-```
-
-**`offset` picks the message, `index` picks the entry inside it.** `offset` counts back from the newest
-(`-1`, `-2`) or names a message outright, so the reference you write stays correct as the conversation grows;
-`index` then means the second URL, the third line, the third number, the second regex match.
-
-`type="number"` takes the numbers that stand on their own (`51`, `77`, `12.5`) - the `1` inside `v1gate` or
-`a1b2c3.png` is not a number you would cite. `type="regex"` runs **your** regular expression over the message
-and returns capture group 1 (or the whole match when there is none); `scope="session"` searches backwards
-through the whole conversation instead of one message, and a pattern that is invalid or matches nothing refuses
-the call and says which it was.
-
-`Every built-in refuses loudly when it finds nothing, and the refusal names what does exist — a guess is only
+**Every built-in refuses loudly when it finds nothing, and the refusal names what does exist — a guess is only
 useful if a wrong one is visible. The `pi-` prefix exists so a tag is never confused with
 an HTML element — `<div>`, `<span>`, `@scope/package` and email addresses are never touched. The bare spelling
 (`<ref type="url" />`) resolves too; an undeclared name (`<whatever />`) is left alone rather than guessed at.
@@ -114,7 +90,8 @@ Write the name bare in config, use it with the prefix in text:
     "host":   { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" },
     "pr":     { "template": "https://github.com/voorjaar/v1gate/pull/{n}", "attrs": ["n"], "description": "a v1gate pull request" },
     "shot":   { "hook": "screenshot", "attrs": ["days"] },
-    "due":    { "js": "return ctx.date('date', '+3d')" },
+    "due":    { "js": true },
+    "shot":   { "js": "tools/shot.js" },
     "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.local/t/{1}" }
   }
 }
@@ -125,19 +102,26 @@ Write the name bare in config, use it with the prefix in text:
 | `value` | `<pi-host />` | `ssh macminister.local` |
 | `template` | `<pi-pr n="12" />` | `https://github.com/voorjaar/v1gate/pull/12` |
 | `hook` | `<pi-shot days="2" />` | whatever your `screenshot()` returns |
-| `js` | `<pi-due />` | the string your JavaScript in the JSON returns |
+| `js` | `<pi-due />` | whatever the `default` export of `~/.pi/agent/tags/due.js` returns |
 | `pattern` | `[[ticket 42]]` | `https://tracker.local/t/42` — your own syntax, your own regex |
 
 `{n}` and `{1}` placeholders come from attributes or capture groups; a missing one refuses the call and names
 the attribute it needs. `disableTags` drops a default tag you do not want.
 
-### JavaScript in the config itself
+### A tag's code is a file: `~/.pi/agent/tags/<name>.js`
 
-A `js` tag is a function body, evaluated with a `ctx`:
+One tag per script, one default export. `"js": true` picks `tags/<name>.js`; a path (`"js":
+"tools/shot.js"`) resolves against the config directory or the tags directory. Naming a tag in the config with
+no `value`/`template`/`hook`/`js` also finds `tags/<name>.js` automatically. Inline JavaScript bodies in the
+JSON are gone.
 
-```json
-{ "tags": { "sum": { "js": "return String(Number(ctx.attrs.a) + Number(ctx.attrs.b))", "attrs": ["a", "b"] } } }
+```js
+// ~/.pi/agent/tags/sum.js
+export const description = "adds two numbers you pass as attributes";
+export default (attrs, ctx) => String(Number(attrs.a) + Number(attrs.b));   // may be async
 ```
+
+`ctx` is the same context everywhere:
 
 ```js
 ctx.name            // the tag name
@@ -149,8 +133,8 @@ ctx.message("-2", "url", "1")      // a part of a pasted message (offset, type, 
 ctx.userMessages                   // how many there are
 ```
 
-No `require`/`import` inside a `js` tag — the context carries what is useful, and the call is bounded by
-`hookTimeoutMs`. Bigger code goes in the hooks file instead.
+A script may export `description` and `attrs` too, and they show up in the guidance. The call is bounded by
+`hookTimeoutMs`, and a script that returns nothing leaves the text as written.
 
 ## JS hooks
 
@@ -193,7 +177,10 @@ text can be computed in JS rather than frozen in the config file.
   "disableTags": ["date"],
   "skillRoots": ["~/my-skills"],
   "vars": { "box": "macminister.local" },
-  "tags": { "host": { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" } }
+  "tags": {
+    "host": { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" },
+    "due":  { "js": true }
+  }
 }
 ```
 
@@ -252,13 +239,14 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-88 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
-`format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`, `var`/`vars`
-including a value that contains a tag and `persist` writing to `.pi/`), every user tag shape (`value`,
-`template`, `hook`, `js`, `pattern`), a throwing hook, a malformed and an out-of-range `offset`, a regex that
-matches nothing, an invalid pattern, `@scope/pkg` and HTML left alone, assistant message rewriting, your own
-input being expanded, the prompt hook, the model gate, `disableTags`, guidance carrying every tag and its
-description, and config problem reporting.
+92 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+`format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`,
+`var`/`vars` including a value that contains a tag, an id captured from another tag, and `persist` writing to
+`.pi/`), every user tag shape (`value`, `template`, `hook`, `js` script file, `pattern`), a missing script file
+reported at load, a throwing hook, a malformed and an out-of-range `offset`, a regex that matches nothing, an
+invalid pattern, `@scope/pkg` and HTML left alone, assistant message rewriting, your own input being expanded,
+the prompt hook, the model gate, `disableTags`, guidance carrying every tag and its description, and config
+problem reporting.
 
 ## License
 

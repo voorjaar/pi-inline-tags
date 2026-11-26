@@ -24,9 +24,12 @@
  *   <pi-result pattern="prefill" context="240" /> what an earlier tool call returned
  *   <pi-env name="HF_ENDPOINT" default="" />    the value of an environment variable
  *   <pi-skill name="lilypond-music" />          the absolute path of an installed skill
- *   <pi-var name="mini" value="ssh macminister.local" /> define a variable, <pi-var name="mini" /> use it
- *   <pi-vars />                                 list the variables the agent named
+ *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
+ *   <pi-vars />                                 list every captured value and which tag produced it
  *   <pi-pr n="12" />                            a tag you defined in JSON
+ *
+ * Every tag also stores what it resolved to: give it `id="target"` and `<pi-var id="target" />` cites it
+ * again; without an id it gets a random one, which `<pi-vars />` lists with its source.
  *
  * `offset` picks the message, `index` picks the entry inside it. Every built-in refuses loudly when it finds
  * nothing, and the refusal names what does exist - a guess is only useful if a wrong one is visible.
@@ -55,10 +58,15 @@
  *       "host":   { "value": "ssh macminister.local", "description": "the mac mini every bench command runs on" },
  *       "pr":     { "template": "https://github.com/voorjaar/v1gate/pull/{n}", "attrs": ["n"] },
  *       "shot":   { "hook": "screenshot", "attrs": ["days"] },
- *       "due":    { "js": "return ctx.date('date', '+3d')" },
+ *       "due":    { "js": true },                     // <agentDir>/tags/due.js: export default (attrs, ctx) => …
+ *       "shot":   { "js": "tools/shot.js" },          // or a path, resolved against the config dir
  *       "ticket": { "pattern": "\\[\\[ticket\\s+(\\d+)\\]\\]", "template": "https://tracker.local/t/{1}" }
  *     }
  *   }
+ *
+ * A tag's code is one file with one default export (`<agentDir>/tags/<name>.js`):
+ *   export const description = "the URL from two messages back";
+ *   export default (attrs, ctx) => ctx.message('-2', 'url');
  *
  * Hooks (JS, ESM; default file `<config dir>/pi-inline-tags.hooks.js`, override with `hooksFile`):
  *   export const host = () => "ssh macminister.local";
@@ -73,7 +81,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform, arch } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -95,11 +103,51 @@ const MAX_GLOB_DEPTH = 8;
 const MAX_TASK_RECORDS = 300;
 const MAX_HISTORY_SCAN = 600;
 const MAX_SKILL_DEPTH = 4;
-const MAX_VARS = 40;
+const MAX_VARS = 60;
+const MAX_AUTO_VARS = 24;
 const VAR_FILE_NAME = "pi-inline-vars.json";
 const MAX_LIST_ITEMS = 20;
 
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+/**
+ * A tag's code lives in its own file: `<agentDir>/tags/<name>.js`, one tag per script.
+ * `"js": true` or a bare name picks `tags/<name>.js`; a path (`"js": "tools/shot.js"`) is resolved
+ * against the config directory, the tags directory, or absolutely.
+ */
+function resolveTagScript(name: string, value: string | boolean, configDir: string): string | undefined {
+  const tagsDir = join(configDir, "tags");
+  const candidates: string[] = [];
+  if (value === true) candidates.push(join(tagsDir, `${name}.js`), join(configDir, `${name}.js`));
+  else {
+    const given = expandHome(value);
+    if (given.endsWith(".js")) candidates.push(given, join(configDir, given), join(tagsDir, given));
+    else candidates.push(join(tagsDir, `${given}.js`), join(configDir, `${given}.js`), join(tagsDir, `${name}.js`));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // try the next spelling
+    }
+  }
+  return undefined;
+}
+
+type TagScriptModule = { default?: unknown; description?: unknown; attrs?: unknown };
+const tagScriptCache = new Map<string, Promise<TagScriptModule | undefined>>();
+
+function loadTagScript(path: string): Promise<TagScriptModule | undefined> {
+  const hit = tagScriptCache.get(path);
+  if (hit) return hit;
+  const loaded = importModule(pathToFileURL(path).href)
+    .then((mod) => (mod && typeof mod === "object" ? (mod as TagScriptModule) : undefined))
+    .catch(() => undefined);
+  tagScriptCache.set(path, loaded);
+  return loaded;
+}
+
+async function importModule(url: string): Promise<unknown> {
+  return await import(url);
+}
 
 /** `<pi-file pattern="bench/*.py" />` globs: `*` `?` `**` and {a,b}. */
 function globToRegExp(glob: string): RegExp {
@@ -279,11 +327,11 @@ const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "s
 
 type TagSpec = {
   name: string;
-  kind: "builtin" | "value" | "template" | "hook" | "js";
+  kind: "builtin" | "value" | "template" | "hook" | "script";
   value?: string;
   template?: string;
   hook?: string;
-  js?: string;
+  script?: string;
   pattern?: string;
   attrs?: string[];
   description?: string;
@@ -358,7 +406,7 @@ function validTagName(name: string): boolean {
 }
 
 /** One tag definition, validated. Returns undefined and reports the problem otherwise. */
-function parseTag(rawName: string, raw: unknown): { spec?: TagSpec; problem?: string } {
+function parseTag(rawName: string, raw: unknown, configDir: string): { spec?: TagSpec; problem?: string } {
   // `pi-` is how a tag is written in text; in config you may write it either way.
   const name = rawName.startsWith(TAG_PREFIX) ? rawName.slice(TAG_PREFIX.length) : rawName;
   if (!validTagName(name)) return { problem: `tag name "${rawName}" must be a short word (optionally prefixed with ${TAG_PREFIX})` };
@@ -387,21 +435,24 @@ function parseTag(rawName: string, raw: unknown): { spec?: TagSpec; problem?: st
     spec.hook = entry.hook;
     given.push("hook");
   }
-  const code = entry.js ?? entry.code;
-  if (code !== undefined) {
-    if (typeof code !== "string") return { problem: `tag "${name}".js must be a JavaScript body string` };
-    if (code.length > 8000) return { problem: `tag "${name}".js is longer than 8000 characters` };
-    try {
-      AsyncFunction("ctx", `"use strict";\n${code}`);
-    } catch (error) {
-      return { problem: `tag "${name}".js is not valid JavaScript: ${String(error)}` };
+  const script = entry.js ?? entry.script ?? entry.file;
+  if (script !== undefined) {
+    if (typeof script !== "string" && script !== true) {
+      return { problem: `tag "${name}".js must be a script path or true (inline JavaScript bodies are gone; the code lives in <agentDir>/tags/${name}.js)` };
     }
-    spec.kind = "js";
-    spec.js = code;
+    const found = resolveTagScript(name, script, configDir);
+    if (!found) return { problem: `tag "${name}".js does not point at a readable file - write one tag per script under ${join(configDir, "tags")}/` };
+    spec.kind = "script";
+    spec.script = found;
     given.push("js");
   }
   if (given.length > 1) return { problem: `tag "${name}" sets ${given.join(" and ")}; use one of value, template, hook, js` };
-  if (given.length === 0) spec.kind = "builtin";
+  if (given.length === 0) {
+    // A file in tags/ is a tag even when the config only names it.
+    const discovered = resolveTagScript(name, true, configDir);
+    if (discovered) { spec.kind = "script"; spec.script = discovered; }
+    else spec.kind = "builtin";
+  }
   if (entry.pattern !== undefined) {
     if (typeof entry.pattern !== "string") return { problem: `tag "${name}".pattern must be a regex source string` };
     if (entry.pattern.length > MAX_PATTERN_CHARS) return { problem: `tag "${name}".pattern is longer than ${MAX_PATTERN_CHARS} characters` };
@@ -512,7 +563,7 @@ function readConfig(): { path: string; config: Config; problems: string[] } {
       const entries = Object.entries(raw.tags as Record<string, unknown>);
       if (entries.length > MAX_TAGS) problems.push(`tags has more than ${MAX_TAGS} entries`);
       for (const [name, definition] of entries.slice(0, MAX_TAGS)) {
-        const result = parseTag(name, definition);
+        const result = parseTag(name, definition, dirname(path));
         if (result.spec) config.tags[name] = result.spec;
         if (result.problem) problems.push(result.problem);
       }
@@ -654,7 +705,7 @@ function fillTemplate(template: string, attrs: Record<string, string>): { text?:
   return missing.length > 0 ? { text, missing } : { text };
 }
 
-async function loadHooks(path: string): Promise<{ hooks: Map<string, HookFn>; tags: TagSpec[]; problems: string[] }> {
+async function loadHooks(path: string, configDir: string): Promise<{ hooks: Map<string, HookFn>; tags: TagSpec[]; problems: string[] }> {
   const hooks = new Map<string, HookFn>();
   const tags: TagSpec[] = [];
   if (!path) return { hooks, tags, problems: [] };
@@ -687,7 +738,7 @@ async function loadHooks(path: string): Promise<{ hooks: Map<string, HookFn>; ta
         continue;
       }
       for (const [name, definition] of Object.entries(value as Record<string, unknown>)) {
-        const result = parseTag(name, definition);
+        const result = parseTag(name, definition, configDir);
         if (result.spec) tags.push({ ...result.spec, source: "hooks" });
         if (result.problem) problems.push(result.problem);
       }
@@ -715,7 +766,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   const hooksPath = config.hooksFile ? expandHome(config.hooksFile) : join(dirname(loaded.path), HOOKS_FILE_NAME);
   let hooks = new Map<string, HookFn>();
   const hookProblems: string[] = [];
-  const hooksReady = loadHooks(hooksPath).then((result) => {
+  const hooksReady = loadHooks(hooksPath, dirname(loaded.path)).then((result) => {
     hooks = result.hooks;
     hookProblems.push(...result.problems);
     // Tags the hook file declares are merged in, so a JS file can define syntax too, not just values.
@@ -854,14 +905,14 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       // Hooks are user code and may be flaky (network, ssh): the text stays as written and /refs records it.
       return value === undefined ? {} : { value };
     }
-    if (spec.kind === "js") {
+    if (spec.kind === "script") {
       const value = await runTagCode(spec, attrs, ctx);
-      return value === undefined ? { missing: `tag <${spec.name}> js returned nothing (a body must return a string)` } : { value };
+      return value === undefined ? { missing: `tag <${TAG_PREFIX}${spec.name}> script ${spec.script ?? ""} returned nothing (its default export must return a string)` } : { value };
     }
     return { missing: `tag <${spec.name}> has no value, template, hook, or js` };
   };
 
-  const tagFunctions = new Map<string, (ctx: TagContext) => Promise<unknown>>();
+  const tagFunctions = new Map<string, TagFn>();
 
   const tagContextFor = (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined): TagContext => ({
     name: spec.name,
@@ -891,27 +942,27 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   const runTagCode = async (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined): Promise<string | undefined> => {
     let fn = tagFunctions.get(spec.name);
     if (!fn) {
-      try {
-        const compiled = AsyncFunction("ctx", `"use strict";\n${spec.js ?? ""}`) as (ctx: TagContext) => Promise<unknown>;
-        tagFunctions.set(spec.name, compiled);
-        fn = compiled;
-      } catch (error) {
-        note(`tag ${spec.name} js failed to compile: ${String(error)}`);
+      const mod = spec.script ? await loadTagScript(spec.script) : undefined;
+      if (!mod || typeof mod.default !== "function") {
+        note(`tag ${spec.name} script ${spec.script ?? ""} has no default export function`);
         return undefined;
       }
+      if (!spec.description && typeof mod.description === "string") spec.description = mod.description.slice(0, 300);
+      fn = mod.default as TagFn;
+      tagFunctions.set(spec.name, fn);
     }
-    const cacheKey = `js:${spec.name}|${Object.entries(attrs).sort().join(",")}`;
+    const cacheKey = `script:${spec.name}|${Object.entries(attrs).sort().join(",")}`;
     const hit = hookCache.get(cacheKey);
     if (hit && Date.now() - hit.at < config.hookCacheSeconds * 1000) return hit.value;
     const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.hookTimeoutMs));
     let outcome: unknown;
     try {
-      outcome = await Promise.race([Promise.resolve(fn(tagContextFor(spec, attrs, ctx))).catch(() => undefined), timeout]);
+      outcome = await Promise.race([Promise.resolve(fn(attrs, tagContextFor(spec, attrs, ctx))).catch(() => undefined), timeout]);
     } catch {
       outcome = undefined;
     }
     if (typeof outcome !== "string" || !outcome.trim()) {
-      note(`tag ${spec.name} js returned nothing`);
+      note(`tag ${spec.name} script returned nothing (the default export must return a string)`);
       return undefined;
     }
     const value = outcome.slice(0, MAX_REF_VALUE_CHARS);
@@ -1082,7 +1133,13 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (hits.length === 0) return { missing: `no file matches pattern="${pattern}" under ${base} (${files.length} file${files.length === 1 ? "" : "s"} looked at)` };
     const sort = (attrs.sort ?? "recent").toLowerCase();
     hits.sort(sort === "name" ? (a, b) => a.rel.localeCompare(b.rel) : (a, b) => b.mtimeMs - a.mtimeMs);
-    const show = (rel: string) => (attrs.absolute === "true" ? join(base, rel) : rel);
+    // Paths come back relative to the working directory, the way every other tool names a file.
+    const show = (rel: string) => {
+      const abs = join(base, rel);
+      if (attrs.absolute === "true") return abs;
+      const fromCwd = relative(cwd, abs);
+      return fromCwd && !fromCwd.startsWith("..") ? fromCwd : rel;
+    };
     if (attrs.all === "true") {
       const listed = hits.slice(0, MAX_LIST_ITEMS).map((file) => show(file.rel));
       return { value: listed.join("\n") + (hits.length > listed.length ? `\n(${hits.length - listed.length} more)` : "") };
@@ -1268,7 +1325,56 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   // --- variables the agent sets for itself ---------------------------------------------------------
-  const varStore = new Map<string, string>(Object.entries(config.vars));
+  type StoredVar = { value: string; source: string; at: number };
+  const varStore = new Map<string, StoredVar>(
+    Object.entries(config.vars).map(([key, value]) => [key, { value, source: "config", at: Date.now() }]),
+  );
+  const usedIds = new Set<string>();
+
+  const newVarId = (): string => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const id = `v${Math.random().toString(36).slice(2, 7)}`;
+      if (!usedIds.has(id)) {
+        usedIds.add(id);
+        return id;
+      }
+    }
+    const id = `v${Date.now().toString(36)}`;
+    usedIds.add(id);
+    return id;
+  };
+
+  /** Named variables win over anonymous captures: the oldest capture is dropped before a name is refused. */
+  const autoEntries = (): Array<{ id: string; at: number }> =>
+    [...varStore.entries()]
+      .filter(([, entry]) => entry.source.startsWith("<"))
+      .map(([id, entry]) => ({ id, at: entry.at }))
+      .sort((a, b) => a.at - b.at);
+
+  const makeRoom = (keepName: boolean): boolean => {
+    if (varStore.size < MAX_VARS) return true;
+    const autos = autoEntries();
+    if (keepName && autos.length > 0) {
+      varStore.delete(autos[0]!.id);
+      return true;
+    }
+    return false;
+  };
+
+  /** Every tag that resolves is remembered, so its result can be cited again by id. */
+  const captureVar = (value: string, attrs: Record<string, string>, source: string): string => {
+    const requested = attrs.id;
+    const explicit = requested && /^[A-Za-z0-9_.-]{1,40}$/.test(requested) ? requested : undefined;
+    let id = explicit;
+    if (!id) {
+      const autos = autoEntries();
+      if (autos.length >= MAX_AUTO_VARS) varStore.delete(autos[0]!.id);
+      id = newVarId();
+    } else if (!varStore.has(id) && !makeRoom(true)) return "";
+    varStore.set(id, { value: value.slice(0, MAX_REF_VALUE_CHARS), source, at: Date.now() });
+    usedIds.add(id);
+    return id;
+  };
   const projectVarFiles = new Set<string>();
 
   const projectVarPath = (cwd: string): string => join(cwd, ".pi", VAR_FILE_NAME);
@@ -1279,7 +1385,14 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     projectVarFiles.add(path);
     try {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      for (const [key, value] of Object.entries(raw)) if (typeof value === "string" && !varStore.has(key)) varStore.set(key, value);
+      for (const [key, value] of Object.entries(raw)) {
+        if (varStore.has(key)) continue;
+        if (typeof value === "string") varStore.set(key, { value, source: "project", at: 0 });
+        else if (value && typeof value === "object") {
+          const entry = value as { value?: unknown; source?: unknown };
+          if (typeof entry.value === "string") varStore.set(key, { value: entry.value, source: typeof entry.source === "string" ? entry.source : "project", at: 0 });
+        }
+      }
     } catch {
       // no project file yet
     }
@@ -1293,7 +1406,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
         for (const [key, value] of Object.entries(raw)) if (typeof value === "string") stored[key] = value;
       }
-      for (const [key, value] of varStore) stored[key] = value;
+      for (const [key, entry] of varStore) stored[key] = { value: entry.value, source: entry.source };
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify(stored, null, 2) + "\n", "utf8");
       projectVarFiles.add(path);
@@ -1302,37 +1415,51 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     }
   };
 
-  const varNames = (): string[] => [...varStore.keys()];
+  const varNames = (): string[] => [...varStore.keys()].reverse();
 
   const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
-    const name = attrs.name;
-    if (!name) return { missing: '<pi-var /> needs name="mini" (and value="…" to define it)' };
-    if (!/^[A-Za-z0-9_.-]{1,40}$/.test(name)) return { missing: `name="${name}" is not a variable name (letters, digits, . _ -, up to 40)` };
+    const id = attrs.id ?? attrs.var ?? attrs.name;
+    if (!id) return { missing: '<pi-var /> needs id="mini" (and value="…" to define it)' };
+    if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
+    if (attrs.id === undefined && (attrs.var || attrs.name)) return { missing: `<pi-var ${attrs.var ? "var" : "name"}="${id}" /> - the attribute is id="…" now` };
     if (attrs.unset === "true") {
-      varStore.delete(name);
+      varStore.delete(id);
       return { value: "" };
     }
     if (attrs.value !== undefined) {
-      if (!varStore.has(name) && varStore.size >= MAX_VARS) return { missing: `${varStore.size} variables are already defined; unset one before adding "${name}"` };
-      const previous = varStore.get(name);
-      varStore.set(name, (attrs.append === "true" && previous ? `${previous}\n${attrs.value}` : attrs.value).slice(0, MAX_REF_VALUE_CHARS));
+      if (!varStore.has(id) && !makeRoom(true)) return { missing: `${varStore.size} variables are already defined; unset one before adding id="${id}"` };
+      const previous = varStore.get(id);
+      varStore.set(id, {
+        value: (attrs.append === "true" && previous ? `${previous.value}\n${attrs.value}` : attrs.value).slice(0, MAX_REF_VALUE_CHARS),
+        source: previous?.source ?? "pi-var",
+        at: Date.now(),
+      });
       if (attrs.persist === "true") saveProjectVars(cwd);
-      return { value: varStore.get(name)! };
+      return { value: varStore.get(id)!.value };
     }
     loadProjectVars(cwd);
-    const stored = varStore.get(name);
+    const stored = varStore.get(id);
     if (stored === undefined) {
       const known = varNames();
-      return { missing: `no variable "${name}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : ' yet (write <pi-var name="mini" value="…" /> first)'}` };
+      return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : ' yet (write <pi-var id="mini" value="…" /> or give any tag an id="…")'}` };
     }
-    if (attrs.part === "length") return { value: String(stored.length) };
-    return { value: stored };
+    if (attrs.part === "length") return { value: String(stored.value.length) };
+    if (attrs.part === "source") return { value: stored.source };
+    return { value: stored.value };
   };
 
   const resolveVarsTag = (): { value?: string; missing?: string } => {
-    const names = varNames();
-    if (names.length === 0) return { missing: "no variables are defined yet - write <pi-var name=\"mini\" value=\"ssh macminister.local\" /> first" };
-    return { value: names.map((name) => `${name} = ${String(varStore.get(name)).slice(0, 160).replace(/\n/g, " ⏎ ")}`).join("\n") };
+    loadProjectVars(process.cwd());
+    const ids = varNames();
+    if (ids.length === 0) return { missing: 'no variables yet - give any tag an id="…" or write <pi-var id="mini" value="ssh macminister.local" />' };
+    return {
+      value: ids
+        .map((id) => {
+          const entry = varStore.get(id)!;
+          return `${id} = ${entry.value.slice(0, 120).replace(/\n/g, " ⏎ ")}  (from ${entry.source})`;
+        })
+        .join("\n"),
+    };
   };
 
   const depthOf = (_attrs: Record<string, string>): number => 0;
@@ -1403,7 +1530,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   async function expandText(text: string, depth: number, ctx: ExtensionContext | undefined): Promise<ExpandOutcome> {
     const used: string[] = [];
     const missing: string[] = [];
-    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; direct?: DirectRequest; attrs: Record<string, string>; error?: string };
+    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; direct?: DirectRequest; tag?: string; attrs: Record<string, string>; error?: string };
     const candidates: Candidate[] = [];
 
     if (elementScanner && text.includes("<")) {
@@ -1414,11 +1541,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         const written = match[1] ?? "";
         const spec = config.tags[written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written];
         if (spec && spec.kind !== "builtin") {
-          candidates.push({ start, end: start + match[0].length, spec, attrs });
+          candidates.push({ start, end: start + match[0].length, spec, tag: written, attrs });
           continue;
         }
         const request = resolveBuiltinElement(written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written, attrs);
-        candidates.push({ start, end: start + match[0].length, attrs, token: request.token, error: request.error, direct: request.direct });
+        candidates.push({ start, end: start + match[0].length, attrs, tag: written, token: request.token, error: request.error, direct: request.direct });
       }
     }
 
@@ -1457,6 +1584,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (resolved.value !== undefined) {
         out += resolved.value;
         used.push(original);
+        // Whatever a tag resolved to is remembered, so `id="…"` or <pi-vars /> can cite it again.
+        const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
+        if (bare !== "var" && bare !== "vars") captureVar(resolved.value, candidate.attrs, `<${candidate.tag}>`);
       } else {
         out += original;
         if (resolved.missing) missing.push(resolved.missing);

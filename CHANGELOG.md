@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+- **A tag's code is a file, not a string in JSON.** `~/.pi/agent/tags/<name>.js` with one default export;
+  `"js": true` or `"js": "tools/shot.js"` points at it, and naming a tag in the config with no other kind finds
+  `tags/<name>.js` on its own. Inline JavaScript bodies are gone - a body in JSON could not be linted, imported,
+  or shared, and one tag per file can.
+- **Every tag stores what it resolved to.** `id="target"` on any tag names the value, `<pi-var id="target" />`
+  cites it again, `part="source"` says which tag produced it. Without an id the value is kept under a generated
+  one and `<pi-vars />` lists them with their source. Named ids are never evicted; anonymous captures are the
+  first dropped when the store fills (24 anonymous, 60 total) - before this a busy session filled the store with
+  captures and then refused the agent's own variable.
+- **`<pi-var>` uses `id`, not `name`**; the old attribute is refused with a message that says what to write.
+- **`<pi-file />` returns paths relative to the working directory** (`bench/rank_all.py`), the way every other
+  tool names a file, instead of relative to the directory the glob happened to start walking in.
+- **Selftest.** 92 checks
+
 ## 0.2.0
 
 The tags that stop the agent guessing things it should have read from the session.

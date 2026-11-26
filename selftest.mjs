@@ -102,6 +102,12 @@ probe.setDate(probe.getDate() + 3);
 const pad = (value) => String(value).padStart(2, "0");
 const inThreeDays = `${probe.getFullYear()}-${pad(probe.getMonth() + 1)}-${pad(probe.getDate())}`;
 
+// One tag per script, under <config dir>/tags/.
+mkdirSync(join(sandbox, "tags"), { recursive: true });
+writeFileSync(join(sandbox, "tags", "due7.js"), "export default (attrs, ctx) => ctx.date('date', '+3d');\n");
+writeFileSync(join(sandbox, "tags", "sum.js"), "export default (attrs) => String(Number(attrs.a) + Number(attrs.b));\n");
+writeFileSync(join(sandbox, "tags", "lasturl.js"), "export default (attrs, ctx) => ctx.message('-2', 'url');\n");
+
 const session = makeSession(
   "main.json",
   {
@@ -109,9 +115,9 @@ const session = makeSession(
       host: { value: "ssh macminister.local" },
       pr: { template: "https://github.com/voorjaar/v1gate/pull/{n}", attrs: ["n"] },
       shot: { hook: "shot", attrs: ["days"] },
-      due7: { js: "return ctx.date('date', '+3d')" },
-      sum: { js: "return String(Number(ctx.attrs.a) + Number(ctx.attrs.b))", attrs: ["a", "b"] },
-      lasturl: { js: "return ctx.message('-2', 'url')" },
+      due7: { js: true },
+      sum: { js: "sum.js", attrs: ["a", "b"] },
+      lasturl: { description: "the URL from two messages back" },
       ticket: { pattern: "\\[\\[ticket\\s+(\\d+)\\]\\]", template: "https://tracker.local/t/{1}" },
     },
     promptHook: "due",
@@ -161,13 +167,13 @@ outcome = await session.call("fetch_content", { url: "<pr />" });
 assert("tool arg: a template tag missing its attribute is refused with what it needs", !!outcome.blocked && /needs n=/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
 
 outcome = await session.call("bash", { command: "echo <due7 />" });
-assert("tool arg: a js tag defined in JSON runs and returns text", !outcome.blocked && outcome.input.command === `echo ${inThreeDays}`, outcome.input.command);
+assert("tool arg: a tag whose code is a script file runs", !outcome.blocked && outcome.input.command === `echo ${inThreeDays}`, outcome.input.command);
 
 outcome = await session.call("bash", { command: '<sum a="21" b="21" />' });
-assert("tool arg: a js tag receives the element attributes", !outcome.blocked && outcome.input.command === "42", outcome.input.command);
+assert("tool arg: a script tag receives the element attributes", !outcome.blocked && outcome.input.command === "42", outcome.input.command);
 
 outcome = await session.call("fetch_content", { url: "<lasturl />" });
-assert("tool arg: a js tag can read the conversation through ctx.message", !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
+assert("tool arg: a script tag can read the conversation through ctx.message", !outcome.blocked && outcome.input.url === "https://cdn.example.com/shots/a1b2c3.png", outcome.input.url);
 
 outcome = await session.call("fetch_content", { url: "[[ticket 42]]" });
 assert("tool arg: a user-defined pattern tag is matched and filled", !outcome.blocked && outcome.input.url === "https://tracker.local/t/42", outcome.input.url);
@@ -229,10 +235,10 @@ assert(
 const gated = makeSession("gated.json", { models: ["llama-cpp"] });
 assert("model gate: unlisted models do not get the guidance", (await gated.userMessage("https://example.com/x")).length === 0);
 
-const bad = makeSession("bad.json", { tags: { broken: { js: "return (" } } });
+const bad = makeSession("bad.json", { tags: { broken: { js: "nope.js" } } });
 await bad.userMessage("x");
 await bad.commands.refs.handler("", bad.ctx);
-assert("config: a tag whose js does not parse is reported, not silently dropped", bad.notices.some((note) => /not valid JavaScript/.test(note)), bad.notices.join("\n"));
+assert("config: a tag whose script file is missing is reported, not silently dropped", bad.notices.some((note) => /does not point at a readable file/.test(note)), bad.notices.join("\n"));
 
 const disabled = makeSession("off.json", { enabled: false });
 await disabled.userMessage("https://example.com/y");
@@ -297,10 +303,11 @@ outcome = await session.call("bash", { command: 'echo <pi-date format="%Q %y" />
 assert('tool arg: an unknown % token is left as written, a known one is filled', !outcome.blocked && outcome.input.command === `echo ${quarter} %y`, outcome.input.command);
 
 const tomorrow = new Date(now.getTime() + 86_400_000);
-const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: 'return ctx.date("date", "+1d", "%Y/%m/%d")' } } });
+writeFileSync(join(sandbox, "tags", "fmt.js"), 'export default (attrs, ctx) => ctx.date("date", "+1d", "%Y/%m/%d");\n');
+const fmtTag = makeSession("fmt.json", { tags: { fmt: { js: true } } });
 await fmtTag.userMessage("x");
 const fmtOutcome = await fmtTag.call("bash", { command: "echo <pi-fmt />" });
-assert("js tag: ctx.date(kind, offset, format) formats", !fmtOutcome.blocked && fmtOutcome.input.command === `echo ${tomorrow.getFullYear()}/${pad2(tomorrow.getMonth() + 1)}/${pad2(tomorrow.getDate())}`, fmtOutcome.input.command);
+assert("script tag: ctx.date(kind, offset, format) formats", !fmtOutcome.blocked && fmtOutcome.input.command === `echo ${tomorrow.getFullYear()}/${pad2(tomorrow.getMonth() + 1)}/${pad2(tomorrow.getDate())}`, fmtOutcome.input.command);
 
 // --- the tags that stop the agent guessing ------------------------------------------------------------
 
@@ -319,7 +326,7 @@ writeFileSync(join(sandbox, ".pi", "tasks", "run1", "a11bbbb22.json"), JSON.stri
 
 outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" />' });
 assert('tool arg: <pi-file pattern="bench/*.py" /> returns a file that really exists',
-  !outcome.blocked && /^echo (eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
+  !outcome.blocked && /^echo bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" absolute="true" />' });
 assert('tool arg: absolute="true" gives the full path', !outcome.blocked && /^echo .+\/bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
@@ -422,38 +429,50 @@ assert("tool arg: a skill that is not installed says where it looked", !!outcome
 
 // --- pi-var: the agent names a thing once and reuses it ---------------------------------------------
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="mini" value="ssh macminister.local" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="mini" value="ssh macminister.local" />' });
 assert('tool arg: <pi-var name="mini" value="…" /> defines it', !outcome.blocked && outcome.input.command === "echo ssh macminister.local", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="mini" /> <pi-var name="mini" /> -v' });
-assert('tool arg: <pi-var name="mini" /> uses it as many times as you like', !outcome.blocked && outcome.input.command === "echo ssh macminister.local ssh macminister.local -v", outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-var id="mini" /> <pi-var id="mini" /> -v' });
+assert('tool arg: <pi-var id="mini" /> uses it as many times as you like', !outcome.blocked && outcome.input.command === "echo ssh macminister.local ssh macminister.local -v", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="mini" value="--thinking off" append="true" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="mini" value="--thinking off" append="true" />' });
 assert('tool arg: append="true" adds a line to the variable', !outcome.blocked && outcome.input.command === "echo ssh macminister.local\n--thinking off", JSON.stringify(outcome.input.command));
 
-outcome = await session.call("bash", { command: "echo <pi-var name=\"never_set\" />" });
-assert("tool arg: using an undefined variable lists the ones that exist", !!outcome.blocked && /no variable "never_set" is defined - defined: mini/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+outcome = await session.call("bash", { command: "echo <pi-var id=\"never_set\" />" });
+assert("tool arg: using an undefined id lists the ones that exist", !!outcome.blocked && /no variable id="never_set" is defined - defined: mini/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: "echo <pi-var name=\"mini\" />" });
+assert('tool arg: the old name="…" attribute is refused and points at id', !!outcome.blocked && /the attribute is id="…" now/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" id="target" /> and <pi-var id="target" />' });
+assert('tool arg: any tag with id="…" stores its result for reuse', !outcome.blocked && /^echo bench\/(eval_suite|rank_all)\.py and bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var id="target" part="source" />' });
+assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && outcome.input.command === "echo <pi-file>", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-task status="running" /> <pi-vars />' });
+assert("tool arg: a tag with no id still gets one and shows up in <pi-vars />", !outcome.blocked && /from <pi-task>/.test(outcome.input.command), outcome.input.command.slice(0, 200));
 
 outcome = await session.call("bash", { command: "echo <pi-vars />" });
 assert("tool arg: <pi-vars /> lists what the agent has named", !outcome.blocked && /mini = ssh macminister/.test(outcome.input.command), outcome.input.command);
 
 await session.userMessage("see https://example.com/shot.png");
-outcome = await session.call("bash", { command: `echo <pi-var name="shot" value="<pi-ref type='url' offset='-1' />" />` });
+outcome = await session.call("bash", { command: `echo <pi-var id="shot" value="<pi-ref type='url' offset='-1' />" />` });
 assert('tool arg: a variable value may itself be a tag', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="shot" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="shot" />' });
 assert('tool arg: reading it back resolves the tag inside it again', !outcome.blocked && outcome.input.command === "echo https://example.com/shot.png", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="shot" unset="true" />done' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="shot" unset="true" />done' });
 assert('tool arg: unset="true" removes it', !outcome.blocked && outcome.input.command === "echo done", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var name="kept" value="persisted value" persist="true" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="kept" value="persisted value" persist="true" />' });
 assert('tool arg: persist="true" writes the variable to the project', !outcome.blocked && outcome.input.command === "echo persisted value", outcome.input.command);
 assert('tool arg: the persisted variable is on disk under .pi/', existsSync(join(sandbox, ".pi", "pi-inline-vars.json")) && readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").includes("kept"), readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").slice(0, 120));
 
 const seeded = makeSession("seeded.json", { vars: { box: "macminister.local" } });
-outcome = await seeded.call("bash", { command: 'echo <pi-var name="box" />' });
-assert('tool arg: vars in the config are available as <pi-var name="…" />', !outcome.blocked && outcome.input.command === "echo macminister.local", outcome.input.command);
+outcome = await seeded.call("bash", { command: 'echo <pi-var id="box" />' });
+assert('tool arg: vars in the config are available as <pi-var id="…" />', !outcome.blocked && outcome.input.command === "echo macminister.local", outcome.input.command);
 
 // --- descriptions: the model is told what your tags mean ---------------------------------------------
 
