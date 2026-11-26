@@ -1056,7 +1056,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
   const resolveDateAttrs = (attrs: Record<string, string>): { value?: string; missing?: string } => {
-    const kind = attrs.value ?? attrs.kind ?? "date";
+    const kind = attrs.value ?? "date";
     const format = attrs.format;
     if (format !== undefined && format.length > 64) return { missing: `format="${format}" is longer than 64 characters` };
     const value = dateValue(kind, attrs.offset, format);
@@ -1379,6 +1379,10 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const name = attrs.name;
     if (!name) return { missing: '<pi-skill /> needs name="lilypond-music"' };
     if (!/^[A-Za-z0-9._-]+$/.test(name)) return { missing: `name="${name}" is not a skill name` };
+    const file = attrs.file;
+    if (file !== undefined && (!/^[A-Za-z0-9._/-]+$/.test(file) || file.startsWith("/") || file.includes(".."))) {
+      return { missing: `file="${file}" is not a path inside the skill folder - write file="scripts/render.py"` };
+    }
     const roots = [
       ...config.skillRoots.map(expandHome),
       join(cwd, ".pi", "skills"),
@@ -1389,7 +1393,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     for (const root of roots) {
       if (!existsSync(root)) continue;
       // <root>/<name>/SKILL.md, <root>/<group>/<name>/SKILL.md, or <root>/<name>.md
-      const direct = [join(root, name, "SKILL.md"), join(root, `${name}.md`)];
+      const wanted = file ?? "SKILL.md";
+      const direct = file ? [join(root, name, file)] : [join(root, name, "SKILL.md"), join(root, `${name}.md`)];
       for (const candidate of direct) if (existsSync(candidate)) return { value: candidate };
       let groups: string[];
       try {
@@ -1398,11 +1403,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         continue;
       }
       for (const group of groups) {
-        const nested = join(root, group, name, "SKILL.md");
+        const nested = join(root, group, name, file ?? "SKILL.md");
         if (existsSync(nested)) return { value: nested };
       }
     }
-    return { missing: `no skill "${name}" found under ${roots.filter(existsSync).join(", ") || "any skill directory"} - add a root with skillRoots in the config` };
+    return { missing: `no skill "${name}"${file ? ` with file="${file}"` : ""} found under ${roots.filter(existsSync).join(", ") || "any skill directory"} - add a root with skillRoots in the config` };
   };
 
   // --- variables the agent sets for itself ---------------------------------------------------------
@@ -1640,7 +1645,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const listed = notes.slice(0, MAX_LIST_ITEMS).map(line);
       return { value: `${notes.length} memory notes\n${listed.join("\n")}${notes.length > listed.length ? `\n(${notes.length - listed.length} more)` : ""}` };
     }
-    const query = attrs.name ?? attrs.query;
+    const query = attrs.name;
     if (!query) return { missing: `<pi-memory name="bash suite" /> names one note, all="true" lists them (${notes.length} notes available)` };
     const ranked = notes
       .map((note) => ({ note, score: memoryScore(query, note) }))
@@ -1721,10 +1726,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   // One name per idea. An alias is not accepted silently: the correction is the point, because a half-accepted
   // attribute is how a reference resolves to the wrong thing.
-  const ATTRIBUTE_ALIASES: Record<string, string> = { match: "pattern", glob: "pattern", source: "pattern", message: "offset", style: "format" };
+  const ATTRIBUTE_ALIASES: Record<string, string> = { match: "pattern", glob: "pattern", source: "pattern", message: "offset", style: "format", kind: "value", query: "name" };
 
   const aliasProblem = (tag: string, attrs: Record<string, string>): string | undefined => {
     for (const [alias, primary] of Object.entries(ATTRIBUTE_ALIASES)) {
+      if (alias === "kind" && tag === "var") continue; // <pi-var kind="…"> has no value= to point at
       if (attrs[alias] !== undefined) {
         return `<pi-${tag} ${alias}="…" /> is not an attribute - write ${primary}="…"`;
       }

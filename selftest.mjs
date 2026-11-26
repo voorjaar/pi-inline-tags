@@ -418,11 +418,22 @@ assert("tool arg: an unset variable is refused, not silently empty", !!outcome.b
 outcome = await session.call("bash", { command: 'echo <pi-env name="PI_INLINE_NOT_SET" default="fallback" />' });
 assert('tool arg: default="…" covers the unset case', !outcome.blocked && outcome.input.command === "echo fallback", outcome.input.command);
 
-mkdirSync(join(sandbox, "skills", "selftest-skill-xyz"), { recursive: true });
+mkdirSync(join(sandbox, "skills", "selftest-skill-xyz", "scripts"), { recursive: true });
 writeFileSync(join(sandbox, "skills", "selftest-skill-xyz", "SKILL.md"), "# selftest");
+writeFileSync(join(sandbox, "skills", "selftest-skill-xyz", "scripts", "render.py"), "# render");
 const skillSession = makeSession("skill.json", { skillRoots: [join(sandbox, "skills")] });
 outcome = await skillSession.call("read", { path: '<pi-skill name="selftest-skill-xyz" />' });
 assert('tool arg: <pi-skill name="…" /> is the absolute SKILL.md path', !outcome.blocked && outcome.input.path === join(sandbox, "skills", "selftest-skill-xyz", "SKILL.md"), outcome.input.path);
+
+outcome = await skillSession.call("read", { path: '<pi-skill name="selftest-skill-xyz" file="scripts/render.py" />' });
+assert('tool arg: <pi-skill file="scripts/render.py" /> reaches a file inside the skill (documented since 0.4, implemented now)',
+  !outcome.blocked && outcome.input.path === join(sandbox, "skills", "selftest-skill-xyz", "scripts", "render.py"), outcome.input.path);
+
+outcome = await skillSession.call("read", { path: '<pi-skill name="selftest-skill-xyz" file="../etc/passwd" />' });
+assert('tool arg: file="…" outside the skill folder is refused', !!outcome.blocked && /is not a path inside the skill folder - write file="scripts\/render.py"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.path);
+
+outcome = await skillSession.call("read", { path: '<pi-skill name="selftest-skill-xyz" file="scripts/missing.py" />' });
+assert('tool arg: a missing file inside a real skill says so', !!outcome.blocked && /no skill "selftest-skill-xyz" with file="scripts\/missing.py"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.path);
 
 outcome = await skillSession.call("read", { path: '<pi-skill name="not_installed" />' });
 assert("tool arg: a skill that is not installed says where it looked", !!outcome.blocked && /no skill "not_installed" found/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : "not blocked");
@@ -525,6 +536,12 @@ assert("tool arg: bodies do not nest - one level only",
 outcome = await session.call("bash", { command: 'echo <pi-var id="plain">plain text with no tags</pi-var> <pi-var id="plain" />' });
 assert("tool arg: a body of plain text is stored and readable",
   !outcome.blocked && outcome.input.command === "echo plain text with no tags plain text with no tags", outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-date kind="date" />' });
+assert('tool arg: kind="…" on pi-date is refused and names value=', !!outcome.blocked && /kind="…" \/> is not an attribute - write value="…"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-memory query="bash suite" />' });
+assert('tool arg: query="…" on pi-memory is refused and names name=', !!outcome.blocked && /query="…" \/> is not an attribute - write name="…"/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 // project memory notes, in the layout this project actually uses
 mkdirSync(join(sandbox, ".memory"), { recursive: true });

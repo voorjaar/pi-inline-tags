@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.1
+
+Audit of the agent-facing guidance against the code that answers it.
+
+- **Fix:** `<pi-skill name="…" file="scripts/render.py" />` was documented since 0.4 but never implemented — the
+  resolver read only `name` and always returned `SKILL.md`, so the attribute silently did nothing. It now resolves
+  inside the skill folder, refuses a path that leaves it (`file="../etc/passwd"`), and says so when the file is
+  missing from a skill that does exist.
+- **Fix:** `<pi-date kind="…">` and `<pi-memory query="…">` were accepted silently as aliases while the guide
+  documented only `value=` / `name=`. They are now refused with the attribute to write, like every other old name.
+- Every guide line was cross-checked attribute by attribute against its resolver (`file`, `task`, `tool`, `repo`,
+  `session`, `history`, `result`, `env`, `skill`, `var`, `debug`, `memory`); the rest matched.
+- 126 selftest checks.
+
 ## 0.8.0
 
 - **A tag can have a body, and a body composes.** `<pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>`
