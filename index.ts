@@ -27,8 +27,9 @@
  *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
  *   <pi-vars />                                 list every captured value and which tag produced it
  *   <pi-debug id="mini" />                      inspect a variable like a console would: the value cut at 50
- *                                             chars, then its length, the tag that produced it, and when it was
- *                                             stored (max="600" widens, full="true" prints all, quiet="true"
+ *                                             chars, then its length, the tag that produced it (no angle
+ *                                             brackets, so a rewrite pass cannot expand it again), and when it
+ *                                             was stored (max="600" widens, full="true" prints all, quiet="true"
  *                                             prints only the value, no id dumps every variable)
  *   <pi-pr n="12" />                            a tag you defined in JSON
  *
@@ -1479,6 +1480,16 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const varNames = (): string[] => [...varStore.keys()].reverse();
 
+  /**
+   * Provenance is written without angle brackets on purpose: the debug line is stored, printed, and then the
+   * transcript rewrite pass reads the text again. `pi-file pattern="bench/*.py"` cannot be mistaken for a tag
+   * the second time; `<pi-file pattern="bench/*.py">` was, and came back as the file it named.
+   */
+  const provenanceOf = (spelling: string): string => {
+    const stripped = spelling.replace(/^</, "").replace(/\s*\/?>$/, "").replace(/\s+/g, " ").trim();
+    return stripped.slice(0, DEBUG_SOURCE_CHARS) || "a tag";
+  };
+
   /** Debug output has to survive being pasted into a shell command: one line, bounded, escapes shown. */
   const debugValue = (value: string, max: number): string => {
     const shown = JSON.stringify(value); // quotes and \n the way a console prints a string
@@ -1538,7 +1549,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       const previous = varStore.get(id);
       varStore.set(id, {
         value: (attrs.append === "true" && previous ? `${previous.value}\n${attrs.value}` : attrs.value).slice(0, MAX_REF_VALUE_CHARS),
-        source: previous?.source ?? `<pi-var id="${id}" value="…">`,
+        source: previous?.source ?? `pi-var id="${id}"`,
         tag: previous?.tag ?? "pi-var",
         auto: previous?.auto ?? false,
         at: Date.now(),
@@ -1700,8 +1711,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
         // The spelling that produced the value is its provenance: <pi-file pattern="bench/*.py">, not just "file".
         if (bare !== "var" && bare !== "vars" && bare !== "debug") {
-          const spelling = (candidate.token ?? original).replace(/\s+/g, " ").replace(/\s*\/>$/, ">");
-          captureVar(resolved.value, candidate.attrs, spelling, candidate.tag ?? bare);
+          captureVar(resolved.value, candidate.attrs, provenanceOf(candidate.token ?? original), candidate.tag ?? bare);
         }
       } else {
         out += original;

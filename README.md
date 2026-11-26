@@ -64,8 +64,8 @@ evicted; anonymous captures are the first to be dropped when the store fills.
 **`pi-debug` is how you look at one**, in the shape a JavaScript console prints it:
 
 ```
-mini = "ssh macminister.local"  (21 chars, from <pi-var id="mini" value="…">, stored 13:34:21)
-target = "bench/rank_all.py"  (17 chars, from <pi-file pattern="bench/*.py" id="target">, stored 13:35:55)
+mini = "ssh macminister.local"  (21 chars, from pi-var id="mini", stored 13:34:21)
+target = "bench/rank_all.py"  (17 chars, from pi-file pattern="bench/*.py" id="target", stored 13:35:55)
 ```
 
 The value is quoted and escaped (`\n` shown as an escape) and cut at 50 characters with `...`, because the line

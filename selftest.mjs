@@ -448,7 +448,7 @@ outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.
 assert('tool arg: any tag with id="…" stores its result for reuse', !outcome.blocked && /^echo bench\/(eval_suite|rank_all)\.py and bench\/(eval_suite|rank_all)\.py$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-var id="target" part="source" />' });
-assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && /^echo <pi-file pattern="bench\/\*\.py" id="target">$/.test(outcome.input.command), outcome.input.command);
+assert('tool arg: part="source" says which tag produced the value', !outcome.blocked && /^echo pi-file pattern="bench\/\*\.py" id="target"$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-task status="running" /> <pi-vars />' });
 assert("tool arg: a tag with no id still gets one and shows up in <pi-vars />", !outcome.blocked && /from <pi-task>/.test(outcome.input.command), outcome.input.command.slice(0, 200));
@@ -493,12 +493,12 @@ await session.call("bash", { command: `echo <pi-var id="long" value="${longValue
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="long" />' });
 assert('tool arg: <pi-debug id="…" /> prints the value cut at 50 characters with "..."',
-  !outcome.blocked && /^echo long = "x{50}\.\.\.  \(200 chars, from <pi-var id="long" value="…">, stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
+  !outcome.blocked && /^echo long = "x{50}\.\.\.  \(200 chars, from pi-var id="long", stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
 
 await session.call("bash", { command: 'echo <pi-var id="short" value="mini.local" />' });
 outcome = await session.call("bash", { command: 'echo <pi-debug id="short" />' });
 assert("tool arg: a short value is printed whole, with no ellipsis",
-  !outcome.blocked && /^echo short = "mini\.local"  \(10 chars, from <pi-var id="short" value="…">, stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
+  !outcome.blocked && /^echo short = "mini\.local"  \(10 chars, from pi-var id="short", stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="short" quiet="true" />' });
 assert('tool arg: quiet="true" gives just the value, for pasting into a command',
@@ -521,11 +521,11 @@ assert("tool arg: a multi-line value stays on one line, the newline shown as an 
 outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py" id="target" /> <pi-debug id="target" />' });
 console.log("DEBUG blocked?", JSON.stringify(outcome.blocked), "CMD:", JSON.stringify(outcome.input.command));
 assert("tool arg: <pi-debug /> names the tag and attributes that produced the value",
-  !outcome.blocked && /target = "bench\/(eval_suite|rank_all)\.py"  \(17 chars, from <pi-file pattern="bench\/\*\.py" id="target">, stored/.test(outcome.input.command), outcome.input.command);
+  !outcome.blocked && /target = "bench\/(eval_suite|rank_all)\.py"  \(17 chars, from pi-file pattern="bench\/\*\.py" id="target", stored/.test(outcome.input.command), outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug />' });
 assert("tool arg: <pi-debug /> with no id dumps every variable with its provenance",
-  !outcome.blocked && /long = "x{50}\.\.\.  \(200 chars, from <pi-var/.test(outcome.input.command) && /target = /.test(outcome.input.command),
+  !outcome.blocked && /long = "x{50}\.\.\.  \(200 chars, from pi-var/.test(outcome.input.command) && /target = /.test(outcome.input.command),
   outcome.input.command.slice(0, 240));
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="nope" />' });

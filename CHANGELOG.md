@@ -3,8 +3,9 @@
 ## 0.5.0
 
 - **`<pi-debug id="…" />` now reports where the value came from**, the way a JavaScript console reports a
-  variable: `target = "bench/rank_all.py"  (17 chars, from <pi-file pattern="bench/*.py" id="target">, stored
-  13:35:55)`. The store keeps the whole spelling that produced the value, not just the tag name, plus a flag for
+  variable: `target = "bench/rank_all.py"  (17 chars, from pi-file pattern="bench/*.py" id="target", stored
+  13:35:55)`. Provenance is written without angle brackets because the transcript rewrite pass reads the printed
+  text a second time, and a bracketed spelling would be expanded again into the thing it names. The store keeps the whole spelling that produced the value, not just the tag name, plus a flag for
   ids the agent never named (shown as `(auto id)`).
 - **The value cut is 50 characters, not 150** — the line now carries length, provenance and a timestamp, and the
   whole line has to survive being pasted into a shell command. `max="…"` widens it, `full="true"` removes the
