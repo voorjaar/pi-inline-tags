@@ -429,13 +429,13 @@ assert("tool arg: a skill that is not installed says where it looked", !!outcome
 
 // --- pi-var: the agent names a thing once and reuses it ---------------------------------------------
 
-outcome = await session.call("bash", { command: 'echo <pi-var id="mini" value="ssh macminister.local" />' });
-assert('tool arg: <pi-var name="mini" value="…" /> defines it', !outcome.blocked && outcome.input.command === "echo ssh macminister.local", outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-var id="mini">ssh macminister.local</pi-var>' });
+assert('tool arg: <pi-var id="mini">…</pi-var> defines it with a body', !outcome.blocked && outcome.input.command === "echo ssh macminister.local", outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-var id="mini" /> <pi-var id="mini" /> -v' });
 assert('tool arg: <pi-var id="mini" /> uses it as many times as you like', !outcome.blocked && outcome.input.command === "echo ssh macminister.local ssh macminister.local -v", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var id="mini" value="--thinking off" append="true" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="mini" append="true">--thinking off</pi-var>' });
 assert('tool arg: append="true" adds a line to the variable', !outcome.blocked && outcome.input.command === "echo ssh macminister.local\n--thinking off", JSON.stringify(outcome.input.command));
 
 outcome = await session.call("bash", { command: "echo <pi-var id=\"never_set\" />" });
@@ -457,15 +457,15 @@ outcome = await session.call("bash", { command: "echo <pi-vars />" });
 assert("tool arg: the retired <pi-vars /> is corrected, not left in the text", !!outcome.blocked && /<pi-vars \/> is gone - <pi-debug \/>/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 await session.userMessage("see https://example.com/shot.png");
-outcome = await session.call("bash", { command: `echo <pi-var id="shot" value="<pi-ref type='url' offset='-1' />" />` });
-assert('tool arg: a value is never another tag - it is refused and points at id="…" on the tag',
-  !!outcome.blocked && /a variable holds plain text only/.test(outcome.blocked.reason) && /<pi-ref type='url' offset='-1' \/>/.test(outcome.blocked.reason),
+outcome = await session.call("bash", { command: 'echo <pi-var id="shot" value="a literal string" />' });
+assert('tool arg: value="…" is retired and points at the body form',
+  !!outcome.blocked && /value="…" is gone: a variable's value is its body - <pi-var id="shot">plain text, or tags to compose<\/pi-var>/.test(outcome.blocked.reason),
   outcome.blocked ? outcome.blocked.reason : outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-var id="shot" unset="true" />done' });
 assert('tool arg: unset="true" removes it', !outcome.blocked && outcome.input.command === "echo done", outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-var id="kept" value="persisted value" persist="true" />' });
+outcome = await session.call("bash", { command: 'echo <pi-var id="kept" persist="true">persisted value</pi-var>' });
 assert('tool arg: persist="true" writes the variable to the project', !outcome.blocked && outcome.input.command === "echo persisted value", outcome.input.command);
 assert('tool arg: the persisted variable is on disk under .pi/', existsSync(join(sandbox, ".pi", "pi-inline-vars.json")) && readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").includes("kept"), readFileSync(join(sandbox, ".pi", "pi-inline-vars.json"), "utf8").slice(0, 120));
 
@@ -482,28 +482,49 @@ const guidance = await described.userMessage("run the suite");
 assert("guidance: a user tag ships with its description so the model knows what it is for",
   guidance.some((line) => line.includes("<pi-host") && line.includes("the mac mini every bench command runs on")), guidance.join("\n").slice(0, 400));
 assert("guidance: every built-in tag is listed with how to write it",
-  ["<pi-ref type=", "<pi-date value=", "<pi-debug id=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name="]
+  ["<pi-ref type=", "<pi-date value=", "<pi-debug id=", "<pi-file pattern=", "<pi-task status=", "<pi-tool index=", "<pi-repo part=", "<pi-session part=", "<pi-history pattern=", "<pi-result pattern=", "<pi-env name=", "<pi-skill name=", "<pi-memory name="]
     .every((form) => guidance.some((line) => line.includes(form))), guidance.join("\n").slice(0, 900));
 
 // --- pi-join: the only composition, and pi-memory: read what the project already learned -----------------
 
-await session.call("bash", { command: 'echo <pi-var id="host" value="ssh macminister.local" />' });
-await session.call("bash", { command: 'echo <pi-var id="dir" value="cd ~/bench" />' });
+await session.call("bash", { command: 'echo <pi-var id="host">ssh macminister.local</pi-var>' });
+await session.call("bash", { command: 'echo <pi-var id="dir">cd ~/bench</pi-var>' });
 
-outcome = await session.call("bash", { command: 'echo <pi-join id="run" parts="host,dir" sep=" && " /> && echo <pi-var id="run" />' });
-assert('tool arg: <pi-join parts="host,dir" sep=" && " /> glues stored values into a reusable value',
+outcome = await session.call("bash", { command: 'echo <pi-var id="run"><pi-var id="host" /> && <pi-var id="dir" /></pi-var> && echo <pi-var id="run" />' });
+assert('tool arg: a variable body composes tags and literal text, then reuses the whole value',
   !outcome.blocked && outcome.input.command === "echo ssh macminister.local && cd ~/bench && echo ssh macminister.local && cd ~/bench", outcome.input.command);
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="run" />' });
-assert("tool arg: a joined value reports the join that produced it",
-  !outcome.blocked && /run = "ssh macminister.local && cd ~\/bench"  \(35 chars, from pi-join id="run" parts="host,dir"/.test(outcome.input.command), outcome.input.command.slice(0, 220));
+assert("tool arg: a composed value reports the variable that composed it",
+  !outcome.blocked && /run = "ssh macminister.local && cd ~\/bench"  \(35 chars, from pi-var id="run"/.test(outcome.input.command), outcome.input.command.slice(0, 220));
 
-outcome = await session.call("bash", { command: 'echo <pi-join id="bad" parts="host,ghost" />' });
-assert("tool arg: a join names the part that is missing and lists what exists",
-  !!outcome.blocked && /names no variable id="ghost" - defined: /.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-var id="adhoc"><pi-file pattern="bench/*.py" index="1" /> <pi-date value="date" /></pi-var>' });
+assert('tool arg: a body composes tags that were never named',
+  !outcome.blocked && /^echo bench\/rank_all\.py \d{4}-\d{2}-\d{2}$/.test(outcome.input.command), outcome.input.command);
 
-outcome = await session.call("bash", { command: 'echo <pi-join />' });
-assert("tool arg: a join with no parts says which ids are defined", !!outcome.blocked && /needs at least two stored ids - defined: /.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+outcome = await session.call("bash", { command: 'echo <pi-join id="x" parts="host,dir" sep=" " />' });
+assert("tool arg: the retired <pi-join /> is corrected to the body form",
+  !!outcome.blocked && /<pi-join \/> is gone - a variable body composes tags/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var id="unclosed">never closed' });
+assert("tool arg: an unclosed body is refused instead of silently reading the variable",
+  !!outcome.blocked && /opens a body that is never closed - write <pi-var id="unclosed">value<\/pi-var>, or read it as <pi-var id="unclosed" \/>/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo done</pi-var>' });
+assert("tool arg: a closing tag nobody opened is refused",
+  !!outcome.blocked && /<\/pi-var> closes nothing - a body is only allowed on <pi-var id="…">…<\/pi-var>/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-file pattern="bench/*.py">text</pi-file>' });
+assert("tool arg: a tag that takes no body says so instead of guessing",
+  !!outcome.blocked && /<pi-file pattern="bench\/\*\.py">text<\/pi-file> has a body but takes none - only <pi-var id="…">…<\/pi-var>/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var id="outer">a<pi-var id="inner">b</pi-var>c</pi-var>' });
+assert("tool arg: bodies do not nest - one level only",
+  !!outcome.blocked && /one level only - a tag body cannot contain <pi-var id="inner">, which wants a body of its own/.test(outcome.blocked.reason), outcome.blocked ? outcome.blocked.reason : outcome.input.command);
+
+outcome = await session.call("bash", { command: 'echo <pi-var id="plain">plain text with no tags</pi-var> <pi-var id="plain" />' });
+assert("tool arg: a body of plain text is stored and readable",
+  !outcome.blocked && outcome.input.command === "echo plain text with no tags plain text with no tags", outcome.input.command);
 
 // project memory notes, in the layout this project actually uses
 mkdirSync(join(sandbox, ".memory"), { recursive: true });
@@ -556,13 +577,13 @@ assert("tool arg: any reference can be named and reused the same way",
 // --- pi-debug: what a variable actually holds, bounded so it survives being pasted into a command -------
 
 const longValue = "x".repeat(200);
-await session.call("bash", { command: `echo <pi-var id="long" value="${longValue}" />` });
+await session.call("bash", { command: `echo <pi-var id="long">${longValue}</pi-var>` });
 
 outcome = await session.call("bash", { command: 'echo <pi-debug id="long" />' });
 assert('tool arg: <pi-debug id="…" /> prints the value cut at 50 characters with "..."',
   !outcome.blocked && /^echo long = "x{50}\.\.\.  \(200 chars, from pi-var id="long", stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
 
-await session.call("bash", { command: 'echo <pi-var id="short" value="mini.local" />' });
+await session.call("bash", { command: 'echo <pi-var id="short">mini.local</pi-var>' });
 outcome = await session.call("bash", { command: 'echo <pi-debug id="short" />' });
 assert("tool arg: a short value is printed whole, with no ellipsis",
   !outcome.blocked && /^echo short = "mini\.local"  \(10 chars, from pi-var id="short", stored \d{2}:\d{2}:\d{2}\)$/.test(outcome.input.command), outcome.input.command);
@@ -579,8 +600,8 @@ outcome = await session.call("bash", { command: 'echo <pi-debug id="long" full="
 assert('tool arg: full="true" prints all of it',
   !outcome.blocked && outcome.input.command.includes(`"${longValue}"`), outcome.input.command.slice(0, 60));
 
-await session.call("bash", { command: 'echo <pi-var id="two" value="line one" />' });
-await session.call("bash", { command: 'echo <pi-var id="two" value="line two" append="true" />' });
+await session.call("bash", { command: 'echo <pi-var id="two">line one</pi-var>' });
+await session.call("bash", { command: 'echo <pi-var id="two" append="true">line two</pi-var>' });
 outcome = await session.call("bash", { command: 'echo <pi-debug id="two" />' });
 assert("tool arg: a multi-line value stays on one line, the newline shown as an escape",
   !outcome.blocked && /echo two = "line one\\nline two"  \(17 chars/.test(outcome.input.command), outcome.input.command);

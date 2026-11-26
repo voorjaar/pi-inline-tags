@@ -40,8 +40,7 @@ silently.
 | `pi-env` | an environment variable | `<pi-env name="HF_ENDPOINT" default="" />` |
 | `pi-skill` | the path of an installed skill | `<pi-skill name="lilypond-music" file="scripts/x.py" />` |
 | `pi-memory` | a project memory note, matched loosely | `<pi-memory name="bash suite axis" />` |
-| `pi-var` | a value the agent stored | `<pi-var id="mini" />` |
-| `pi-join` | several stored values glued together | `<pi-join id="cmd" parts="host,dir" sep=" && " />` |
+| `pi-var` | a value the agent stored | `<pi-var id="mini" />` reads it, `<pi-var id="mini">ssh host</pi-var>` writes it |
 | `pi-debug` | what a stored value really is | `<pi-debug id="speed" />` |
 
 `offset="-1"` is the most recent user message (`offset="7"` the seventh), `index` picks the entry inside it,
@@ -74,20 +73,31 @@ echo <pi-result pattern="prefill" id="speed" />   # freezes the text it resolved
 echo <pi-var id="speed" />                      # reuse it
 ```
 
-`<pi-var id="mini" value="plain text" />` defines a value yourself. **A value is never another tag** —
-`<pi-var id="x" value="<pi-ref … />" />` is refused, because a stored reference means different text at different
-times. `append="true"`, `unset="true"`, `part="source|length"` and `persist="true"` (writes
-`.pi/pi-inline-vars.json`, so the next session starts with it) work on any stored value. Named ids are never
+**A variable's value is its body**: `<pi-var id="mini">ssh macminister.local</pi-var>` writes it,
+`<pi-var id="mini" />` reads it. `append="true"`, `unset="true"`, `part="source|length"` and `persist="true"`
+(writes `.pi/pi-inline-vars.json`, so the next session starts with it) work on the body. Named ids are never
 evicted; anonymous captures are dropped first.
 
-**`pi-join` composes them** — the only way to build a bigger fact and reuse it:
+**A body composes tags** — they resolve left to right, the literal text between them stays, and the whole span
+is replaced once and stored:
 
 ```
-<pi-var id="host" value="ssh macminister.local" />
-<pi-var id="dir"  value="cd ~/bench" />
-<pi-join id="run" parts="host,dir" sep=" && " />   →  ssh macminister.local && cd ~/bench
-<pi-var id="run" />
+<pi-var id="host">ssh macminister.local</pi-var>
+<pi-var id="dir">cd ~/bench</pi-var>
+<pi-var id="run"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>   →  ssh macminister.local && cd ~/bench
+<pi-var id="run" />                                                     # reuse it as often as you like
 ```
+
+The parts do not have to be named first, which is what makes a body worth more than a list of ids:
+
+```
+<pi-var id="adhoc"><pi-file pattern="bench/*.py" index="1" /> <pi-date value="date" /></pi-var>
+→ bench/rank_all.py 2026-11-29
+```
+
+Two rules keep this from becoming a tree: **only `<pi-var>` and your own tags declared with `"children": true`
+take a body**, and **bodies do not nest**. Ambiguous spellings are refused rather than guessed at —
+`<pi-var id="x">text` (never closed), `</pi-var>` with no opening tag, and a body on a tag that takes none.
 
 **`pi-debug`** prints a stored value the way a console prints a variable — value quoted, cut at 50 characters,
 then its length, where it came from, and when:
@@ -148,6 +158,17 @@ the script automatically.
 // ~/.pi/agent/tags/sum.js
 export const description = "adds two numbers passed as attributes";   // shows up in the guidance
 export default (attrs, ctx) => String(Number(attrs.a) + Number(attrs.b));   // may be async
+```
+
+Declare `"children": true` and the tag may be written with a body; the function then receives `ctx.children`
+(the resolved values, in order) and `ctx.body` (the body as written):
+
+```json
+{ "tags": { "table": { "js": "tools/table.js", "children": true } } }
+```
+
+```
+<pi-table sep=" | "><pi-var id="model" /><pi-var id="score" /></pi-table>   →   Mellum2.1 0.825 | Bolt 0.749
 ```
 
 `ctx` carries what is useful: `attrs`, `type`, `index`, `modifier`, `match`, `cwd`, `model`, `env()`, `now()`,
@@ -215,7 +236,7 @@ write them.
 
 - **No execution.** A tag only ever reads. Running things stays with the shell, so one expansion cannot cause
   side effects before the preflight has refused the call.
-- **No arithmetic, no control flow.** `pi-join` is the whole composition story on purpose.
+- **No arithmetic, no control flow.** A tag body is the whole composition story on purpose, and it is one level deep.
 - **No vault writes, no shell, no network.** It never edits a note, moves a file, or runs a command.
 - **No silent fallback.** A reference that resolves to nothing stops the call.
 
@@ -227,10 +248,11 @@ cd pi-inline-tags
 npm test          # node --experimental-strip-types selftest.mjs
 ```
 
-116 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
-`format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`, `var`, `join`,
-`memory` with fuzzy matching and `all`), every user tag shape (`value`, `template`, `hook`, `script file`,
-`pattern`), a missing script file reported at load, a throwing hook, malformed and out-of-range offsets, a regex
+121 checks against a fake pi host and real temp files: every built-in (`ref` in all seven types, `date` with
+`format`, `file`, `task`, `tool`/`tools`, `repo`, `session`, `history`, `result`, `env`, `skill`, `var` with a
+composing body, `debug`, `memory` with fuzzy matching and `all`), every user tag shape (`value`, `template`,
+`hook`, `script file`, `pattern`, `children`), a missing script file reported at load, a throwing hook, malformed
+and out-of-range offsets, retired tags and attributes, unclosed and unmatched bodies, a regex
 that matches nothing, an invalid pattern, retired tags and old attribute names, `@scope/pkg` and HTML left alone,
 assistant message rewriting, your own input being expanded, the prompt hook, the model gate, `disableTags`, and
 config problem reporting.

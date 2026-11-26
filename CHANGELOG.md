@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0
+
+- **A tag can have a body, and a body composes.** `<pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>`
+  resolves its tags left to right, keeps the literal text between them, replaces the whole span once, and stores
+  the result. Composition no longer needs the pieces to be named first:
+  `<pi-var id="adhoc"><pi-file pattern="bench/*.py" index="1" /> <pi-date value="date" /></pi-var>`.
+- **`<pi-var>`'s value is its body.** `value="…"` is retired (refused with the correction), which makes the
+  spelling unambiguous: self-closing reads, a body writes. `<pi-var id="x" append="true">line</pi-var>` and
+  `persist="true"` work on the body.
+- **`<pi-join />` is gone** for the same reason — a body with literal text between the tags says the same thing
+  and lets the separator be anything.
+- **Bodies are refused when they would be ambiguous**, not guessed at: an unclosed `<pi-var id="x">` (which used
+  to read the variable and leave the text behind), a closing tag nobody opened, a body on a tag that takes none,
+  and a body inside a body (one level only).
+- **User tags can take a body too**: declare `"children": true` and the hook or script receives `ctx.children`
+  (the resolved values in order) and `ctx.body` (the raw body).
+- 121 selftest checks.
+
 ## 0.7.0
 
 - **`<pi-join id="cmd" parts="host,dir" sep=" && " />`** — the first composition: glue stored values into one

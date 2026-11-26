@@ -24,8 +24,8 @@
  *   <pi-result pattern="prefill" context="240" /> what an earlier tool call returned
  *   <pi-env name="HF_ENDPOINT" default="" />    the value of an environment variable
  *   <pi-skill name="lilypond-music" />          the absolute path of an installed skill
- *   <pi-var id="mini" value="ssh macminister.local" /> define a variable, <pi-var id="mini" /> use it
- *   <pi-join id="cmd" parts="host,dir" sep=" && " />  glue stored values into one reusable value
+ *   <pi-var id="mini">ssh macminister.local</pi-var>      define a variable (a body writes, self-closing reads)
+ *   <pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>   compose tags into one value
  *   <pi-memory name="bash suite axis" />        a project memory note (.memory/), matched loosely; all="true" lists them
  *   <pi-debug id="mini" />                      inspect a variable like a console would: the value cut at 50
  *                                             chars, then its length, the tag that produced it (no angle
@@ -36,6 +36,9 @@
  *
  * Every tag also stores what it resolved to: give it `id="target"` and `<pi-var id="target" />` cites it
  * again; without an id it gets a random one, which `<pi-debug />` lists with its source.
+ *
+ * A tag body is a composition of tags resolved left to right; only `<pi-var>` and your own tags declared with
+ * `"children": true` take one, and bodies do not nest.
  *
  * `offset` picks the message, `index` picks the entry inside it. Every built-in refuses loudly when it finds
  * nothing, and the refusal names what does exist - a guess is only useful if a wrong one is visible.
@@ -195,10 +198,10 @@ const BUILTIN_GUIDE: Record<string, string> = {
   result: '<pi-result pattern="prefill" part="text|tool" context="240" full="true" error="true" all="true" /> - what an earlier tool call returned',
   env: '<pi-env name="HF_ENDPOINT" default="" /> - the value of an environment variable',
   skill: '<pi-skill name="lilypond-music" file="scripts/x.py" /> - the absolute path of an installed skill',
-  var: '<pi-var id="mini" value="plain text" /> defines it (a value is never another tag), <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line',
+  var: '<pi-var id="mini">ssh macminister.local</pi-var> defines it (self-closing reads, a body writes), <pi-var id="mini" /> uses it, <pi-var id="mini" append="true" /> adds a line, and a body may hold tags to compose: <pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>',
   debug: '<pi-debug id="mini" /> inspects it the way a console prints a variable: the value cut at 50 characters, then its length, the tag that produced it and when it was stored (max="600" widens it, full="true" prints all of it, quiet="true" prints only the value, no id dumps every variable)',
-  join: '<pi-join id="cmd" parts="host,dir,args" sep=" && " /> - glue stored values into one value you can reuse',
   memory: '<pi-memory name="bash suite" part="description|name|type|path|body" all="true" /> - a project memory note, matched loosely',
+  nesting: 'a body composes: <pi-var id="x">text <pi-file pattern="bench/*.py" /> text</pi-var>. One level only, and only <pi-var> or your own tags with "children": true take a body',
   store: 'to keep what a command printed, put the id on the reference instead: <pi-result pattern="prefill" id="speed" /> then <pi-var id="speed" />',
 };
 
@@ -339,10 +342,11 @@ const PATH_PATTERN = /(?:~|\/)[A-Za-z0-9_./-]{3,}/g;
 
 /** The shipped defaults. `tags` in the config adds to them, `disableTags` removes from them. */
 const TAG_PREFIX = "pi-";
-const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "debug", "join", "memory"];
+const BUILTIN_TAGS = ["ref", "date", "file", "task", "tool", "tools", "repo", "session", "history", "result", "env", "skill", "var", "debug", "memory"];
 // Spelled out so an old habit gets a correction instead of being left in the text untouched.
 const RETIRED_TAGS: Record<string, string> = {
   vars: '<pi-vars /> is gone - <pi-debug /> lists every variable with its source',
+  join: '<pi-join /> is gone - a variable body composes tags: <pi-var id="cmd"><pi-var id="host" /> && <pi-var id="dir" /></pi-var>',
 };
 
 type TagSpec = {
@@ -354,6 +358,8 @@ type TagSpec = {
   script?: string;
   pattern?: string;
   attrs?: string[];
+  /** true when this tag may be written as <pi-name …>body</pi-name> and wants the resolved children. */
+  children?: boolean;
   description?: string;
   source: "builtin" | "config" | "hooks";
 };
@@ -362,6 +368,10 @@ type TagSpec = {
 type TagContext = {
   name: string;
   attrs: Record<string, string>;
+  /** Resolved values of the tags inside <pi-name …>body</pi-name>, left to right. Empty when written self-closing. */
+  children: string[];
+  /** The body exactly as written, before its tags were resolved. */
+  body: string;
   type?: string;
   offset?: string;
   index?: string;
@@ -600,6 +610,10 @@ type UserMessage = { n: number; text: string; urls: string[]; paths: string[] };
 type HookContext = {
   name: string;
   attrs: Record<string, string>;
+  /** Resolved values of the tags inside <pi-name …>body</pi-name>, left to right. Empty when written self-closing. */
+  children: string[];
+  /** The body exactly as written, before its tags were resolved. */
+  body: string;
   modifier?: string;
   match?: string;
   model?: string;
@@ -846,6 +860,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   let tagNames: string[] = [];
   let tagPatterns: Array<{ name: string; regex: RegExp; spec: TagSpec }> = [];
   let elementScanner: RegExp | undefined;
+  let containerScanner: RegExp | undefined;
+  let closerScanner: RegExp | undefined;
+  let openTagScanner: RegExp | undefined;
 
   function rebuildScanners(): void {
     const disabled = new Set(config.disableTags);
@@ -866,7 +883,12 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       .map((spec) => ({ name: spec.name, spec, regex: new RegExp(spec.pattern as string, "g") }))
       .filter((entry) => entry.regex.source.length <= MAX_PATTERN_CHARS + 4);
     // A quoted attribute value may itself hold an element, so quotes are matched before `>` is excluded.
-    elementScanner = tagNames.length > 0 ? new RegExp(`<(${tagNames.join("|")})\\b((?:'[^']*'|"[^"]*"|[^>])*)\\/?>`, "g") : undefined;
+    const names = tagNames.join("|");
+    elementScanner = tagNames.length > 0 ? new RegExp(`<(${names})\\b((?:'[^']*'|"[^"]*"|[^>])*)\\/?>`, "g") : undefined;
+    // <pi-var id="x"> … </pi-var>: a body is a composition of tags, so it is matched before the flat pass.
+    containerScanner = tagNames.length > 0 ? new RegExp(`<(${names})\\b((?:'[^']*'|"[^"]*"|[^>])*)>((?:(?!<\\/\\1)[\\s\\S])*?)<\\/\\1>`, "g") : undefined;
+    closerScanner = tagNames.length > 0 ? new RegExp(`<\/(${names})>`, "g") : undefined;
+    openTagScanner = tagNames.length > 0 ? new RegExp(`<(${names})\\b((?:'[^']*'|"[^"]*"|[^>])*)>`, "g") : undefined;
   }
   rebuildScanners();
 
@@ -892,7 +914,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   const callHook = async (name: string, info: Omit<HookContext, "name">): Promise<string | undefined> => {
     const fn = hooks.get(name);
     if (!fn) return undefined;
-    const cacheKey = `${name}|${Object.entries(info.attrs).sort().join(",")}|${info.modifier ?? ""}`;
+    const cacheKey = `${name}|${Object.entries(info.attrs).sort().join(",")}|${info.modifier ?? ""}|${(info as { body?: string }).body ?? ""}`;
     const hit = hookCache.get(cacheKey);
     if (hit && Date.now() - hit.at < config.hookCacheSeconds * 1000) return hit.value;
     const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.hookTimeoutMs));
@@ -942,6 +964,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     spec: TagSpec,
     attrs: Record<string, string>,
     ctx: ExtensionContext | undefined,
+    bodyRef?: { raw: string; parts: string[] },
   ): Promise<{ value?: string; missing?: string }> => {
     if (spec.kind === "value") return { value: spec.value };
     if (spec.kind === "template") {
@@ -955,6 +978,8 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (spec.kind === "hook") {
       const value = await callHook(spec.hook ?? spec.name, {
         attrs,
+        children: bodyRef?.parts ?? [],
+        body: bodyRef?.raw ?? "",
         modifier: attrs.modifier ?? attrs.offset,
         model: modelOf(ctx),
         cwd: process.cwd(),
@@ -964,7 +989,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       return value === undefined ? {} : { value };
     }
     if (spec.kind === "script") {
-      const value = await runTagCode(spec, attrs, ctx);
+      const value = await runTagCode(spec, attrs, ctx, bodyRef);
       return value === undefined ? { missing: `tag <${TAG_PREFIX}${spec.name}> script ${spec.script ?? ""} returned nothing (its default export must return a string)` } : { value };
     }
     return { missing: `tag <${spec.name}> has no value, template, hook, or js` };
@@ -972,9 +997,11 @@ export default function piInlineTags(pi: ExtensionAPI): void {
 
   const tagFunctions = new Map<string, TagFn>();
 
-  const tagContextFor = (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined): TagContext => ({
+  const tagContextFor = (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined, body?: { raw: string; parts: string[] }): TagContext => ({
     name: spec.name,
     attrs,
+    children: body?.parts ?? [],
+    body: body?.raw ?? "",
     type: attrs.type,
     offset: attrs.offset,
     index: attrs.index,
@@ -997,7 +1024,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     userMessages: userMessages.length,
   });
 
-  const runTagCode = async (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined): Promise<string | undefined> => {
+  const runTagCode = async (spec: TagSpec, attrs: Record<string, string>, ctx: ExtensionContext | undefined, bodyRef?: { raw: string; parts: string[] }): Promise<string | undefined> => {
     let fn = tagFunctions.get(spec.name);
     if (!fn) {
       const mod = spec.script ? await loadTagScript(spec.script) : undefined;
@@ -1009,13 +1036,13 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       fn = mod.default as TagFn;
       tagFunctions.set(spec.name, fn);
     }
-    const cacheKey = `script:${spec.name}|${Object.entries(attrs).sort().join(",")}`;
+    const cacheKey = `script:${spec.name}|${Object.entries(attrs).sort().join(",")}|${bodyRef?.raw ?? ""}`;
     const hit = hookCache.get(cacheKey);
     if (hit && Date.now() - hit.at < config.hookCacheSeconds * 1000) return hit.value;
     const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), config.hookTimeoutMs));
     let outcome: unknown;
     try {
-      outcome = await Promise.race([Promise.resolve(fn(attrs, tagContextFor(spec, attrs, ctx))).catch(() => undefined), timeout]);
+      outcome = await Promise.race([Promise.resolve(fn(attrs, tagContextFor(spec, attrs, ctx, bodyRef))).catch(() => undefined), timeout]);
     } catch {
       outcome = undefined;
     }
@@ -1057,7 +1084,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     if (request.kind === "skill") return resolveSkillTag(attrs, cwd);
     if (request.kind === "var") return resolveVarTag(attrs, cwd);
     if (request.kind === "debug") return resolveDebugTag(attrs, cwd);
-    if (request.kind === "join") return resolveJoinTag(attrs, cwd);
     if (request.kind === "memory") return resolveMemoryTag(attrs, cwd);
     const offset = attrs.offset ?? attrs.message ?? "-1";
     if (!/^-?\d+$/.test(offset)) return { missing: `offset="${offset}" must be a message offset (offset="-1" is the most recent)` };
@@ -1541,26 +1567,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return { value: describeVar(id, stored, show, quiet) };
   };
 
-  /** Glue stored values together: the only composition the tag set has, and the only way to build a bigger fact. */
-  const resolveJoinTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
-    loadProjectVars(cwd);
-    const parts = (attrs.parts ?? "").split(",").map((part) => part.trim()).filter((part) => part.length > 0);
-    const known = varNames();
-    if (parts.length === 0) {
-      return { missing: `<pi-join id="…" parts="id,id,…" /> needs at least two stored ids${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " (none are defined yet)"}` };
-    }
-    const rawSep = attrs.sep ?? " ";
-    const sep = rawSep === "\\n" || rawSep === "newline" ? "\n" : rawSep;
-    const values: string[] = [];
-    for (const part of parts) {
-      const entry = varStore.get(part);
-      if (!entry) {
-        return { missing: `parts="${parts.join(",")}" names no variable id="${part}"${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : " (none are defined)"}` };
-      }
-      values.push(entry.value);
-    }
-    return { value: values.join(sep).slice(0, MAX_REF_VALUE_CHARS) };
-  };
+
 
   type MemoryNote = { name: string; description: string; type: string; file: string; body: string };
   const memoryNotes = new Map<string, MemoryNote[]>();
@@ -1667,22 +1674,22 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     return hit ? hit[0] : undefined;
   };
 
-  const resolveVarTag = (attrs: Record<string, string>, cwd: string): { value?: string; missing?: string } => {
-    const id = attrs.id ?? attrs.var ?? attrs.name;
-    if (!id) return { missing: '<pi-var /> needs id="mini" (and value="…" to define it)' };
+  const resolveVarTag = (attrs: Record<string, string>, cwd: string, body?: Body): { value?: string; missing?: string } => {
+    const id = attrs.id;
+    if (attrs.value !== undefined) return { missing: `value="…" is gone: a variable's value is its body - <pi-var id="${attrs.id ?? "mini"}">plain text, or tags to compose</pi-var>` };
+    if (attrs.var !== undefined || attrs.name !== undefined) return { missing: `<pi-var ${attrs.var ? "var" : "name"}="…" /> - the attribute is id="…" now` };
+    if (!id) return { missing: '<pi-var id="mini">ssh macminister.local</pi-var> defines it, <pi-var id="mini" /> reads it' };
     if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) return { missing: `id="${id}" is not a variable id (letters, digits, . _ -, up to 40)` };
-    if (attrs.id === undefined && (attrs.var || attrs.name)) return { missing: `<pi-var ${attrs.var ? "var" : "name"}="${id}" /> - the attribute is id="…" now` };
     if (attrs.unset === "true") {
       varStore.delete(id);
       return { value: "" };
     }
-    if (attrs.value !== undefined) {
-      const nested = findTagIn(attrs.value);
-      if (nested) return { missing: `the value of id="${id}" contains ${nested} - a variable holds plain text only. To store what a tag resolved to, put the id on that tag: <pi-result pattern="prefill" id="${id}" />` };
+    if (body !== undefined) {
       if (!varStore.has(id) && !makeRoom(true)) return { missing: `${varStore.size} variables are already defined; unset one before adding id="${id}"` };
       const previous = varStore.get(id);
+      const text = attrs.append === "true" && previous ? `${previous.value}\n${body.text}` : body.text;
       varStore.set(id, {
-        value: (attrs.append === "true" && previous ? `${previous.value}\n${attrs.value}` : attrs.value).slice(0, MAX_REF_VALUE_CHARS),
+        value: text.slice(0, MAX_REF_VALUE_CHARS),
         source: previous?.source ?? `pi-var id="${id}"`,
         tag: previous?.tag ?? "pi-var",
         auto: previous?.auto ?? false,
@@ -1695,7 +1702,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
     const stored = varStore.get(id);
     if (stored === undefined) {
       const known = varNames();
-      return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : ' yet (write <pi-var id="mini" value="…" /> or give any tag an id="…")'}` };
+      return { missing: `no variable id="${id}" is defined${known.length > 0 ? ` - defined: ${known.slice(0, 12).join(", ")}` : ' yet (write <pi-var id="mini">ssh macminister.local</pi-var> or give any tag an id="…")'}` };
     }
     if (attrs.part === "length") return { value: String(stored.value.length) };
     // The provenance is text about the value, not another reference to expand.
@@ -1708,7 +1715,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   const depthOf = (_attrs: Record<string, string>): number => 0;
 
   type DirectRequest = {
-    kind: "number" | "regex" | "date" | "file" | "task" | "tool" | "repo" | "session" | "history" | "result" | "env" | "skill" | "var" | "debug" | "join" | "memory";
+    kind: "number" | "regex" | "date" | "file" | "task" | "tool" | "repo" | "session" | "history" | "result" | "env" | "skill" | "var" | "debug" | "memory";
     attrs: Record<string, string>;
   };
 
@@ -1780,8 +1787,6 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         return { direct: { kind: "skill", attrs } };
       case "var":
         return { direct: { kind: "var", attrs } };
-      case "join":
-        return { direct: { kind: "join", attrs } };
       case "memory":
         return { direct: { kind: "memory", attrs } };
       case "debug":
@@ -1792,20 +1797,86 @@ export default function piInlineTags(pi: ExtensionAPI): void {
   };
 
 
-  type ExpandOutcome = { text: string; used: string[]; missing: string[] };
+  const takesBody = (bare: string) => bare === "var" || config.tags[bare]?.children === true;
+
+  /** A tag body is a composition: its tags resolve left to right, and the literal text between them stays. */
+  async function composeBody(raw: string, ctx: ExtensionContext | undefined, depth: number): Promise<{ body?: Body; missing?: string }> {
+    // Bodies do not nest: a tree this deep is where a reference stops being readable.
+    if (openTagScanner) {
+      openTagScanner.lastIndex = 0;
+      for (const match of raw.matchAll(openTagScanner)) {
+        const written = match[1] ?? "";
+        const bare = written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written;
+        if (!(match[0].endsWith("/>")) && takesBody(bare)) {
+          return { missing: `one level only - a tag body cannot contain ${match[0]}, which wants a body of its own` };
+        }
+      }
+    }
+    const out = await expandText(raw, depth + 1, ctx);
+    if (out.missing.length > 0) return { missing: out.missing[0] };
+    return { body: { raw, text: out.text, parts: out.values } };
+  }
+
+  const resolveContainer = async (
+    written: string,
+    spelling: string,
+    attrs: Record<string, string>,
+    body: string,
+    ctx: ExtensionContext | undefined,
+    depth: number,
+  ): Promise<{ value?: string; missing?: string }> => {
+    const bare = written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written;
+    const spec = config.tags[bare];
+    const composed = await composeBody(body, ctx, depth);
+    if (composed.missing) return { missing: composed.missing };
+    const bodyValue = composed.body!;
+    if (bare === "var") return resolveVarTag(attrs, ctx?.cwd ?? process.cwd(), bodyValue);
+    if (spec?.children === true) return resolveSpec(spec, attrs, ctx, bodyValue);
+    if (spec) return { missing: `${spelling} has a body but its config does not take one - add "children": true to receive it` };
+    return { missing: `${spelling} has a body but takes none - only <pi-var id="…">…</pi-var> and your own tags with "children": true` };
+  };
+
+  type ExpandOutcome = { text: string; used: string[]; values: string[]; missing: string[] };
+  type Body = { raw: string; text: string; parts: string[] };
 
   async function expandText(text: string, depth: number, ctx: ExtensionContext | undefined): Promise<ExpandOutcome> {
     const used: string[] = [];
+    const values: string[] = [];
     const missing: string[] = [];
-    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; direct?: DirectRequest; tag?: string; attrs: Record<string, string>; error?: string };
+    type Candidate = { start: number; end: number; token?: string; spec?: TagSpec; direct?: DirectRequest; tag?: string; spelling?: string; attrs: Record<string, string>; error?: string; body?: string };
     const candidates: Candidate[] = [];
+    const containers: Array<[number, number]> = [];
+
+    // A body is resolved as a unit: its tags resolve first, then the whole span is replaced once.
+    if (containerScanner && depth === 0 && text.includes("<")) {
+      containerScanner.lastIndex = 0;
+      for (const match of text.matchAll(containerScanner)) {
+        const start = match.index ?? 0;
+        const written = match[1] ?? "";
+        candidates.push({ start, end: start + match[0].length, tag: written, spelling: match[0], attrs: parseAttrs(match[2] ?? ""), body: match[3] ?? "" });
+        containers.push([start, start + match[0].length]);
+      }
+    }
+    const insideContainer = (at: number) => containers.some(([from, to]) => at >= from && at < to);
 
     if (elementScanner && text.includes("<")) {
       elementScanner.lastIndex = 0;
       for (const match of text.matchAll(elementScanner)) {
         const start = match.index ?? 0;
+        if (insideContainer(start)) continue; // already covered by a body
         const attrs = parseAttrs(match[2] ?? "");
         const written = match[1] ?? "";
+        // `<pi-var id="x">` with no closing tag reads the variable and leaves the text behind; that is a
+        // composition the agent meant to write, so it is refused rather than guessed at.
+        if (!(match[0].endsWith("/>")) && !insideContainer(start)) {
+          const bareWritten = written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written;
+          const takesBody = bareWritten === "var" || config.tags[bareWritten]?.children === true;
+          if (takesBody) {
+            const selfClosing = match[0].replace(/>$/, " />");
+            candidates.push({ start, end: start + match[0].length, tag: written, attrs, error: `${match[0]} opens a body that is never closed - write ${match[0]}value</${written}>, or read it as ${selfClosing}` });
+            continue;
+          }
+        }
         const spec = config.tags[written.startsWith(TAG_PREFIX) ? written.slice(TAG_PREFIX.length) : written];
         if (spec && spec.kind !== "builtin") {
           candidates.push({ start, end: start + match[0].length, spec, tag: written, attrs });
@@ -1828,7 +1899,17 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       }
     }
 
-    if (candidates.length === 0) return { text, used, missing };
+    if (closerScanner && text.includes("</")) {
+      closerScanner.lastIndex = 0;
+      for (const match of text.matchAll(closerScanner)) {
+        const at = match.index ?? 0;
+        if (insideContainer(at)) continue;
+        missing.push(`${match[0]} closes nothing - a body is only allowed on <pi-var id="…">…</pi-var> and your own tags with "children": true`);
+        break;
+      }
+    }
+
+    if (candidates.length === 0) return { text, used, values, missing };
     candidates.sort((a, b) => a.start - b.start);
 
     let out = "";
@@ -1843,7 +1924,9 @@ export default function piInlineTags(pi: ExtensionAPI): void {
         missing.push(candidate.error);
         continue;
       }
-      const resolved = candidate.spec
+      const resolved = candidate.body !== undefined
+        ? await resolveContainer(candidate.tag ?? "", candidate.spelling ?? candidate.tag ?? "", candidate.attrs, candidate.body, ctx, depth)
+        : candidate.spec
         ? await resolveSpec(candidate.spec, candidate.attrs, ctx)
         : candidate.direct
           ? await resolveDirect(candidate.direct, candidate.attrs, ctx, depth)
@@ -1851,6 +1934,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       if (resolved.value !== undefined) {
         out += resolved.value;
         used.push(original);
+        values.push(resolved.value);
         // Whatever a tag resolved to is remembered, so `id="…"` or <pi-debug /> can cite it again.
         const bare = (candidate.tag ?? "").startsWith(TAG_PREFIX) ? (candidate.tag as string).slice(TAG_PREFIX.length) : candidate.tag ?? "";
         // The spelling that produced the value is its provenance: <pi-file pattern="bench/*.py">, not just "file".
@@ -1863,7 +1947,7 @@ export default function piInlineTags(pi: ExtensionAPI): void {
       }
     }
     out += text.slice(cursor);
-    return { text: out, used, missing };
+    return { text: out, used, values, missing };
   }
 
   async function expandValue(value: unknown, depth: number, ctx: ExtensionContext | undefined): Promise<{ value: unknown; used: string[]; missing: string[] }> {
